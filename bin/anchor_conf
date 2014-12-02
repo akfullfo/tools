@@ -1,0 +1,143 @@
+#!/usr/bin/env python
+# ________________________________________________________________________
+#
+#  Copyright (C) 2014 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+
+import sys, re, os, argparse
+
+program = os.path.basename(os.path.splitext(sys.argv[0])[0])
+
+def fatal(fmt, *fargs):
+	sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+	sys.exit(2)
+
+def verb(fmt, *fargs):
+	if not args.quiet:
+		sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+
+def update(doc, tag_start, tag_end, content):
+	ret = []
+	skipping = False
+	found = False
+	for line in list(doc):
+		if skipping:
+			if line == tag_end:
+				skipping = False
+				ret.extend(content)
+				found = True
+		elif line == tag_start:
+			skipping = True
+		else:
+			ret.append(line)
+	if not found:
+		ret.extend(content)
+	return ret
+
+def process(doc, anchors, config_file):
+	config_base = os.path.basename(config_file)
+	tag_start = '<!-- CONFIG "%s" START linked by %s.  Keep comment to allow auto update -->\n' % (config_base, program)
+	tag_end = '<!-- CONFIG "%s" END linked by %s.  Keep comment to allow auto update -->\n' % (config_base, program)
+	with open(config_file, 'rt') as f:
+		conf = f.readlines()
+	linked_conf = [
+		tag_start,
+		"<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN %s TO UPDATE -->\n" % (program, ),
+		'<pre>\n'
+	]
+	sq_match = re.compile(r"'(\w+)'")
+	brace_match = re.compile(r"{(\w+)}")
+	pos = 0
+	for line in conf:
+		pos += 1
+		sq_list = set()
+		brace_list = set()
+		for m in sq_match.finditer(line):
+			tag = m.group(1)
+			if tag in anchors:
+				sq_list.add(tag)
+			else:
+				verb("Link '%s' from '%s' line %d has no anchor in document", tag, config_file, pos)
+		for m in brace_match.finditer(line):
+			tag = m.group(1)
+			if tag in anchors:
+				brace_list.add(tag)
+		for tag in sq_list:
+			line = re.sub("'"+tag+"'", """'<a href="#%s">%s</a>'""" % (tag, tag), line)
+		for tag in brace_list:
+			line = re.sub("{"+tag+"}", """{<a href="#%s">%s</a>}""" % (tag, tag), line)
+		linked_conf.append(line)
+	linked_conf.extend([
+		'</pre>\n',
+		tag_end
+	])
+	if args.dry_run:
+		print ''.join(linked_conf)
+	else:
+		doc = update(doc, tag_start, tag_end, linked_conf)
+	return doc
+
+p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
+	description="""
+Extracts known anchors from an html or markdown document then looks for those
+anchors in a "taskforce" configuration file.  The configuration is converted
+to create links into the document.  The configuration is then injected into
+the document, replacing a prior edition.
+
+The document anchors recognized are in the form: <a name="ANCHOR"></a>
+
+In the configuration, links will be created only for elements present in
+single quotes that have a corresponding document anchor.
+
+When the document is being updated, the configuration will be surrounded with
+specific html comments.  If these comments are present, that section of the
+document will be updated.  If not, the configuration will be added to the end
+of the document.  So, after the first time through, the document should be
+edited to move the configuration to the correct place.
+""")
+
+p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Report only errors.')
+p.add_argument('-n', '--dry-run', action='store_true', dest='dry_run',
+		help='Instead of updating the document, just write the converted configuration to stdout')
+p.add_argument('document', help='The html or markdown document to be processed')
+p.add_argument('config', nargs='+', help='The config files to be processed.  The document will be updated with each in turn')
+
+args = p.parse_args()
+
+with open(args.document, 'rt') as f:
+	doc = f.readlines()
+orig = list(doc)
+
+anchor_match = re.compile(r'''<a name=["'](\w+)['"]></a>''')
+pos = 0
+known_anchors = {}
+for line in doc:
+	pos += 1
+	for m in anchor_match.finditer(line):
+		anchor = m.group(1)
+		if anchor in known_anchors:
+			verb("Duplicate anchor '%s' at line %d, previous at line %d", anchor, pos, known_anchors[anchor])
+		else:
+			known_anchors[anchor] = pos
+for fname in args.config:
+	doc = process(doc, known_anchors, fname)
+if not args.dry_run:
+	if doc == orig:
+		verb("No change in document '%s'", args.document)
+	else:
+		with open(args.document, 'wt') as f:
+			f.writelines(doc)
+		verb("Document '%s' updated", args.document)
