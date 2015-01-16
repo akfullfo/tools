@@ -58,27 +58,31 @@ def process(doc, anchors, config_file):
 		"<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN %s TO UPDATE -->\n" % (program, ),
 		'<pre>\n'
 	]
-	sq_match = re.compile(r"'(\w+)'")
+	sq_match = re.compile(r"'([ \w]+)'")
 	brace_match = re.compile(r"{(\w+)}")
 	pos = 0
 	for line in conf:
 		pos += 1
-		sq_list = set()
-		brace_list = set()
+		sq_list = {}
+		brace_list = {}
 		for m in sq_match.finditer(line):
-			tag = m.group(1)
+			val = m.group(1)
+			tag = re.sub(r'\W+', '-', val.lower())
 			if tag in anchors:
-				sq_list.add(tag)
+				sq_list[tag] = val
 			else:
 				verb("Link '%s' from '%s' line %d has no anchor in document", tag, config_file, pos)
 		for m in brace_match.finditer(line):
 			tag = m.group(1)
 			if tag in anchors:
-				brace_list.add(tag)
-		for tag in sq_list:
-			line = re.sub("'"+tag+"'", """'<a href="#%s">%s</a>'""" % (tag, tag), line)
-		for tag in brace_list:
-			line = re.sub("{"+tag+"}", """{<a href="#%s">%s</a>}""" % (tag, tag), line)
+				brace_list[tag] = tag
+		for tag, val in sq_list.items():
+			if args.double_quotes:
+				line = re.sub("'"+val+"'", '''"<a href="#%s">%s</a>"''' % (tag, val), line)
+			else:
+				line = re.sub("'"+val+"'", """'<a href="#%s">%s</a>'""" % (tag, val), line)
+		for tag, val in brace_list.items():
+			line = re.sub("{"+val+"}", """{<a href="#%s">%s</a>}""" % (tag, val), line)
 		linked_conf.append(line)
 	linked_conf.extend([
 		'</pre>\n',
@@ -97,7 +101,13 @@ anchors in a "taskforce" configuration file.  The configuration is converted
 to create links into the document.  The configuration is then injected into
 the document, replacing a prior edition.
 
-The document anchors recognized are in the form: <a name="ANCHOR"></a>
+The document anchors recognized are in either the form:
+	<a name="ANCHOR"></a>
+or:
+	^#+ ANCHOR #*$
+
+In the later (title) form, the ANCHOR is canonicalized in the same way that
+github processes the markdown titles.
 
 In the configuration, links will be created only for elements present in
 single quotes that have a corresponding document anchor.
@@ -110,6 +120,8 @@ edited to move the configuration to the correct place.
 """)
 
 p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Report only errors.')
+p.add_argument('-p', '--preserve-single-quotes', action='store_false', dest='double_quotes',
+		help="Don't convert the single quotes used to tag keywords into double quotes")
 p.add_argument('-n', '--dry-run', action='store_true', dest='dry_run',
 		help='Instead of updating the document, just write the converted configuration to stdout')
 p.add_argument('document', help='The html or markdown document to be processed')
@@ -121,15 +133,22 @@ with open(args.document, 'rt') as f:
 	doc = f.readlines()
 orig = list(doc)
 
-anchor_match = re.compile(r'''<a name=["'](\w+)['"]></a>''')
+ml_anchor_match = re.compile(r'''<a name=["'](\w+)['"]></a>''')
+md_anchor_match = re.compile(r'''^#+\s*(\w[ \w]*\w)\s*#*$''')
 pos = 0
 known_anchors = {}
 for line in doc:
 	pos += 1
-	for m in anchor_match.finditer(line):
+	for m in ml_anchor_match.finditer(line):
 		anchor = m.group(1)
 		if anchor in known_anchors:
-			verb("Duplicate anchor '%s' at line %d, previous at line %d", anchor, pos, known_anchors[anchor])
+			verb("Duplicate hmtl anchor '%s' at line %d, previous at line %d", anchor, pos, known_anchors[anchor])
+		else:
+			known_anchors[anchor] = pos
+	for m in md_anchor_match.finditer(line):
+		anchor = re.sub(r'\W+', '-', m.group(1).lower())
+		if anchor in known_anchors:
+			verb("Duplicate markdown anchor '%s' at line %d, previous at line %d", anchor, pos, known_anchors[anchor])
 		else:
 			known_anchors[anchor] = pos
 for fname in args.config:
