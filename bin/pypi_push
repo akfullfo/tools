@@ -17,9 +17,11 @@
 # ________________________________________________________________________
 #
 
-import sys, re, os, pipes, subprocess, argparse
+import sys, re, os, time, pipes, subprocess, argparse
 
 program = os.path.basename(os.path.splitext(sys.argv[0])[0])
+
+changelogfile = 'CHANGELOG.md'
 
 def fatal(fmt, *fargs):
 	sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
@@ -51,7 +53,7 @@ def substatus(status):
 		msg = 'exited '+str(status)
 	return msg
 
-def run(cmd):
+def run(cmd, output=None, replace=None):
 	params = {}
 	if type(cmd) != list:
 		cmd = str(cmd)
@@ -78,6 +80,12 @@ def run(cmd):
 			fatal("Command <%s> %s", cmdstr, substatus(e.returncode))
 	except Exception as e:
 		fatal("Exec of <%s> failed -- %s", cmdstr, str(e))
+	if type(replace) is list and len(replace) == 2:
+		out = re.sub(replace[0], replace[1], out)
+	if output is not None:
+		with open(output, 'w') as f:
+			f.write(out)
+	return out
 
 
 p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -106,6 +114,8 @@ p.add_argument('-n', '--dry-run', action='store_true', dest='dry_run',
 		help='Report commands that would be run without running them')
 p.add_argument('-k', '--rotate', action='store', dest='rotate', type=int, default=1,
 		help='Number of versions to retain.  Use zero to disable, default is 1.')
+p.add_argument('-C', '--no-changelog', action='store_false', dest='changelog',
+		help='Skip generating and committing a new CHANGELOG.md')
 p.add_argument('-I', '--no-increment', action='store_false', dest='increment',
 		help='Skip incrementing the version.  Ignored if --version is specfied.')
 p.add_argument('-T', '--no-tag', action='store_false', dest='tag', help='Skip tagging the repository.')
@@ -152,8 +162,17 @@ if verlines != outlines:
 	except Exception as e:
 		fatal("Init file '%s' update failed -- %s", verfile, str(e))
 
+if args.changelog:
+	version_str = '%s (%s)' % (newver, time.strftime('%Y-%m-%d'))
+	version_str += '\n' + '-' * len(version_str)
+	run(['gitchangelog'], output=changelogfile, replace=[r'%%version%%\n-+', version_str])
+
 if args.increment or args.version is not None:
-	run(['git', 'commit', verfile, '-m', 'Release '+newver])
+	cmd = ['git', 'commit', verfile]
+	if args.changelog:
+		cmd.append(changelogfile)
+	cmd.extend(['-m', 'Release '+newver])
+	run(cmd)
 	run(['git', 'push'])
 
 if args.tag:
