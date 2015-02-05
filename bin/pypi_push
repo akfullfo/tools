@@ -53,7 +53,7 @@ def substatus(status):
 		msg = 'exited '+str(status)
 	return msg
 
-def run(cmd, output=None, replace=None):
+def run(cmd, output=None, replaces=[]):
 	params = {}
 	if type(cmd) != list:
 		cmd = str(cmd)
@@ -80,8 +80,11 @@ def run(cmd, output=None, replace=None):
 			fatal("Command <%s> %s", cmdstr, substatus(e.returncode))
 	except Exception as e:
 		fatal("Exec of <%s> failed -- %s", cmdstr, str(e))
-	if type(replace) is list and len(replace) == 2:
-		out = re.sub(replace[0], replace[1], out)
+	for replace in replaces:
+		if len(replace) == 2:
+			out = re.sub(replace[0], replace[1], out)
+		else:
+			fatal("Bad replace tuple -- %s", str(replace))
 	if output is not None:
 		with open(output, 'w') as f:
 			f.write(out)
@@ -165,7 +168,8 @@ if verlines != outlines:
 if args.changelog:
 	version_str = '%s (%s)' % (newver, time.strftime('%Y-%m-%d'))
 	version_str += '\n' + '-' * len(version_str)
-	run(['gitchangelog'], output=changelogfile, replace=[r'%%version%%\n-+', version_str])
+	run(['gitchangelog'], output=changelogfile,
+		replaces=[(r'%%version%%\n-+', version_str), (r'\n- #(\d)', r'\n- Issue \1')])
 
 if args.increment or args.version is not None:
 	cmd = ['git', 'commit', verfile]
