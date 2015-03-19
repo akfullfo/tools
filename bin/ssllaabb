@@ -1,0 +1,201 @@
+#!/usr/bin/env python
+# ________________________________________________________________________
+#
+#  Copyright (C) 2014 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+
+import os, sys, socket, re, json, argparse
+try:
+        from http.client import HTTPConnection, HTTPSConnection
+except:
+	from httplib import HTTPConnection, HTTPSConnection
+try:
+	from urllib.parse import urlparse, urlencode
+except:
+	from urlparse import urlparse
+	from urllib import urlencode
+
+program = os.path.basename(os.path.splitext(sys.argv[0])[0])
+
+def_base_url = 'https://api.ssllabs.com/api/v2/'
+def_initial_secs = 180
+def_retry_secs = 30
+def_passing_grade = "A+"
+
+def_port = 80
+def_sslport = 443
+
+def fatal(fmt, *fargs):
+	sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+	sys.exit(2)
+
+def info(fmt, *fargs):
+	if not args.quiet:
+		sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+
+def verb(fmt, *fargs):
+	if args.verbose:
+		sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+
+class HttpClient(object):
+	"""
+	Provides methods to access the taskforce http service.	These are basically
+	for convenience in clients, and are particularly useful when using
+	Unix domain sockets (thanks to Erik van Zijst for the nice approach --
+	https://pypi.python.org/pypi/uhttplib).
+
+	Parameters:
+
+	  base_url	- The address to connect to.
+	  		  This may be specified as "http[s]://host[:port]/path/"
+			  The path passed to get() will be appended to this for each call.
+	  timeout	- The timeout in seconds (float) for query I/O.
+"""
+	def __init__(self, base_url, timeout=30):
+		u = urlparse(base_url)
+		if not u.hostname:
+			fatal("A host name is required in the base url '%s'", base_url)
+		host = u.hostname
+		if u.username or u.password:
+			fatal("Authentication is not supported in base url '%s'", base_url)
+		if u.query:
+			fatal("The base url '%s' may not contain a query path", base_url)
+		port = None
+		if u.port:
+			port = u.port
+		if u.scheme == 'https':
+			if not port:
+				port = def_sslport
+			self.http = HTTPSConnection(host, port, timeout=timeout)
+		elif u.scheme == 'http':
+			if not port:
+				port = def_port
+			self.http = HTTPConnection(host, port, timeout=timeout)
+		else:
+			fatal("Unsupported scheme '%s' in base url '%s'", u.scheme, base_url)
+		try:
+			self.http.connect()
+		except Exception as e:
+			fatal("Connection to %s:%d failed -- %s", host, port, str(e))
+		self.sock = self.http.sock
+		self.base_path = u.path
+		self.lastpath = self.base_path
+		verb("HTTP connected to %s://%s:%d/", u.scheme, host, port)
+		if u.scheme == 'https' and hasattr(self.http.sock, 'cipher'):
+			verb("Cipher: %s", self.http.sock.cipher())
+
+	def get(self, path, query=None):
+		"""
+		Issue a GET request.  If specfied, "query" should be a dict of name/value
+		pairs.	Names should be normal identifiers which start with an alpha
+		followed by alnums or underscores.  The values are url-encoded and
+		become the "query" part of the request header (ie, the part after
+		the '?' in the URI).
+
+		The result is the tuple:
+			(code, content, content_type)
+
+		If the request is unsuccessful returning code 400 or higher,
+		a fatal error is returned.
+	"""
+		self.lastpath = self.base_path
+		if path:
+			self.lastpath = self.lastpath.rstrip('/')
+			self.lastpath += '/' + path
+		if query is not None:
+			self.lastpath += '?' + urlencode(query)
+		self.http.request('GET', self.lastpath)
+		resp = self.http.getresponse()
+		ctype = resp.getheader('Content-Type')
+		data = resp.read().decode('utf-8')
+		verb("Request '%s' status %d, %s length %d", self.lastpath, resp.status, ctype, len(data))
+		if resp.status < 300:
+			return (resp.status, data, ctype)
+		else:
+			msg =  data.strip()[:200]
+			fatal("HTTP Error %d%s", resp.status, ' -- '+msg if msg else '')
+
+	def getmap(self, path, query=None):
+		"""
+		Performs a GET request where the response content type is required to be
+		"application/json" and the content is a JSON-encoded data structure.
+		The decoded structure is returned.
+	"""
+		code, data, ctype = self.get(path, query)
+		t = ctype.split(';')
+		if t[0].strip() != 'application/json':
+			fatal("Expecting JSON from GET of '%s', got '%s'", self.lastpath, ctype)
+		try:
+			result = json.loads(data)
+		except Exception as e:
+			fatal("Could not load JSON content from GET '%s' -- %s", self.lastpath, str(e))
+		return result
+
+p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
+	description="""
+Initiates a server scan using the SSLlabs.com free SSL scan API.
+
+In normal operation, this checks that the scanning site is operational, initiates
+a scan, and the periodically checks until the scan is complete.  Experience shows
+this typically takes about %d minutes, so the program will wait that long before
+checking back and then will check back every %d seconds.
+
+In "quiet" mode, if the result is at least a passing grade, the program exits
+quietly.  The general idea is that you can run this from cron and only get an
+email if your site has dropped below expectations.
+
+Why the name?  I feel like I'm rereading Catch-22 every time I type "ssllabs".
+http://www.cliffsnotes.com/literature/c/catch22/summary-and-analysis/chapters-1718
+""" %(def_initial_secs/60, def_retry_secs))
+
+p.add_argument('-v', '--verbose', action='store_true', dest='verbose', help='Report progress.')
+p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Report only errors.')
+p.add_argument('-W', '--ignore-warnings', action='store_true', dest='quiet',
+		help='Report if the SSLlabs "hasWarnings" flag is set')
+p.add_argument('-p', '--pass', action='store', dest='passing_grade', default=def_passing_grade,
+		help="Set the passing grade.  Default is '%s' because it really isn't that hard to do"%(def_passing_grade,))
+p.add_argument('-P', '--probe-period', action='store', dest='probe_period', type=int,
+		help="Override the default status cycle, in seconds")
+p.add_argument('-u', '--base-url', action='store', dest='base_url', default=def_base_url,
+		help="Set the base url of the test site.  Default is '%s'"%(def_base_url,))
+p.add_argument('host', help='The site (FQDN only) to be tested')
+
+args = p.parse_args()
+
+if args.probe_period:
+	initial_delay = probe_period
+	retry_delay = probe_period
+else:
+	initial_delay = def_initial_secs
+	retry_delay = def_retry_secs
+
+verb("starting")
+lab = HttpClient(args.base_url)
+
+state = lab.getmap('info')
+
+verb("resp = %s", state)
+current = state.get(u'currentAssessments')
+capacity = state.get(u'maxAssessments')
+info("%s version %s, current assessments %s of %s", args.base_url, state.get(u'engineVersion'), str(current), str(capacity))
+
+if current is None or capacity is None:
+	warn("Response did not include capacity info, pressing on regardless")
+	load = 0
+else:
+	load = current * 100 / capacity
+if load > 60:
+	fatal("Excessive load on %s, won't schedule an assessment of '%s'", args.base_url, args.host)
