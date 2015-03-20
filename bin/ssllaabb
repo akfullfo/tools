@@ -167,6 +167,14 @@ def canonical_grade(grade):
 		grade_ord -= 1
 	return grade_ord
 
+def get_age(state):
+	end_time = state.get('testTime')
+	if end_time:
+		end_time /= 1000.0
+		return time.time() - end_time
+	else:
+		return None
+
 def get_duration(state):
 	start_time = state.get('startTime')
 	if start_time: start_time /= 1000.0
@@ -312,16 +320,20 @@ if not grade:
 	fatal("Could not determine any grade for '%s'", args.host)
 if grade_num < passing_grade_num:
 	fatal("For '%s', the assessment returned a failing grade of '%s'", args.host, grade)
-verb("Total execution time: %.1f secs", time.time() - program_start)
+test_age_mins = get_age(state) / 60.0
+if test_age_mins < 2:
+	test_age_mins = None
+verb("Total execution time: %.1f secs%s",
+		time.time() - program_start, '' if test_age_mins is None else ", %.0f mins ago"%(test_age_mins))
 if args.report_warnings and has_warnings:
-	warn("Host '%s' received grade '%s'%s%s",
-				args.host, grade,
-				' with WARNINGS' if has_warnings else '',
-				'' if duration is None else ', test ran for %.1f secs' % (duration,))
-	sys.exit(1)
+	report_func = warn
+	exit_code = 1
 else:
-	info("Host '%s' received grade '%s'%s%s",
+	report_func = info
+	exit_code = 0
+report_func("Host '%s' received grade '%s'%s%s%s",
 				args.host, grade,
 				' with WARNINGS' if has_warnings else '',
-				'' if duration is None else ', test ran for %.1f secs' % (duration,))
-	sys.exit(0)
+				'' if duration is None else ', test ran for %.1f secs' % (duration,),
+				'' if test_age_mins is None else ", %.0f mins ago"%(test_age_mins))
+sys.exit(exit_code)
