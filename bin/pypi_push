@@ -126,6 +126,11 @@ p.add_argument('-P', '--no-publish', action='store_false', dest='publish', help=
 
 args = p.parse_args()
 
+if args.publish:
+	pypirc = os.path.join(os.environ['HOME'], '.pypirc')
+	if not os.path.exists(pypirc):
+		fatal("No PyPI setup exists in %s", pypirc)
+
 # Find the name of the repo and package which must match.
 #
 repo = os.path.basename(os.path.realpath('.'))
