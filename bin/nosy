@@ -75,4 +75,9 @@ fi
 export PYTHONPATH
 export NOSE_LOG_LEVEL
 
-exec nosetests "$@"
+coverargs=''
+if [ -n "$NOSE_WITH_COVERAGE" ]; then
+	coverargs='--with-coverage'
+fi
+
+exec nosetests $coverargs "$@"
