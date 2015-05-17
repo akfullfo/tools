@@ -81,6 +81,7 @@ export NOSE_LOG_LEVEL
 
 coverargs=''
 if [ -n "$NOSE_WITH_COVERAGE" ]; then
+	coverage erase
 	coverargs='--with-coverage'
 fi
 
