@@ -24,7 +24,7 @@ NOSE_LOG_DEFAULT='warning'
 usage()
 {
 	cat >&2 <<EOT
-Usage: $P [--help] [--loglevel debug|info|warning|error] [nosetests_args]
+Usage: $P [--help] [--coverage] [--loglevel debug|info|warning|error] [nosetests_args]
 
        Run "nosetests" in the current directory with the
        NOSE_LOG_LEVEL set according to the -loglevel flag.
@@ -41,6 +41,10 @@ NOSE_LOG_LEVEL="$NOSE_LOG_DEFAULT"
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
+	-c|--coverage)
+		NOSE_WITH_COVERAGE=yes
+		export NOSE_WITH_COVERAGE
+		;;
 	-l|--loglevel)
 		shift
 		case "$1" in
