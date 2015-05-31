@@ -33,7 +33,7 @@ program = os.path.basename(os.path.splitext(sys.argv[0])[0])
 def_base_url = 'https://api.ssllabs.com/api/v2/'
 def_initial_secs = 150
 def_retry_secs = 30
-def_passing_grade = "A+"
+def_passing_grade = "A"
 def_max_attempts = 10
 def_last_assessment = os.path.join(os.environ['HOME'], program+'-last.json')
 
@@ -73,27 +73,27 @@ class HttpClient(object):
 		u = urlparse(base_url)
 		if not u.hostname:
 			fatal("A host name is required in the base url '%s'", base_url)
-		host = u.hostname
+		self.host = u.hostname
 		if u.username or u.password:
 			fatal("Authentication is not supported in base url '%s'", base_url)
 		if u.query:
 			fatal("The base url '%s' may not contain a query path", base_url)
-		port = None
+		self.port = None
 		if u.port:
-			port = u.port
+			self.port = u.port
 		if u.scheme == 'https':
-			if not port:
-				port = def_sslport
-			self.http = HTTPSConnection(host, port, timeout=timeout)
+			if not self.port:
+				self.port = def_sslport
+			self.http = HTTPSConnection(self.host, self.port, timeout=timeout)
 		elif u.scheme == 'http':
-			if not port:
-				port = def_port
-			self.http = HTTPConnection(host, port, timeout=timeout)
+			if not self.port:
+				self.port = def_port
+			self.http = HTTPConnection(self.host, self.port, timeout=timeout)
 		else:
 			fatal("Unsupported scheme '%s' in base url '%s'", u.scheme, base_url)
 		self.base_path = u.path
 		self.lastpath = self.base_path
-		verb("HTTP connected to %s://%s:%d/", u.scheme, host, port)
+		verb("HTTP connected to %s://%s:%d/", u.scheme, self.host, self.port)
 		if u.scheme == 'https' and hasattr(self.http.sock, 'cipher'):
 			verb("Cipher: %s", self.http.sock.cipher())
 
@@ -114,7 +114,7 @@ class HttpClient(object):
 		try:
 			self.http.connect()
 		except Exception as e:
-			fatal("Connection to %s:%d failed -- %s", host, port, str(e))
+			fatal("Connection to %s:%d failed -- %s", self.host, self.port, str(e))
 		self.lastpath = self.base_path
 		if path:
 			self.lastpath = self.lastpath.rstrip('/')
@@ -182,13 +182,13 @@ def get_duration(state):
 	if end_time: end_time /= 1000.0
 	if start_time and end_time:
 		duration = end_time - start_time
-		verb("Assesment for '%s' ran for %.1f secs", args.host, duration)
+		verb("Assesment for '%s' ran for %.1f secs", args.host_under_test, duration)
 	elif start_time:
 		duration = time.time() - start_time
-		verb("Assesment for '%s' now running for %.1f secs", args.host, duration)
+		verb("Assesment for '%s' now running for %.1f secs", args.host_under_test, duration)
 	else:
 		duration = None
-		warn("No 'startTime' in response for host '%s'", args.host)
+		warn("No 'startTime' in response for host '%s'", args.host_under_test)
 	return duration
 
 p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -218,7 +218,10 @@ p.add_argument('-p', '--publish', action='store_true', dest='publish',
 p.add_argument('-l', '--last-assessment', action='store', dest='last_assessment_file', default=def_last_assessment,
 		help="Where to record the last assessment received.  Default is '%s', use '' to disable"%(def_last_assessment,))
 p.add_argument('-g', '--grade', action='store', dest='passing_grade', default=def_passing_grade,
-		help="Set the passing grade.  Default is '%s' because it really isn't that hard to do"%(def_passing_grade,))
+		help="""Set the passing grade.  Default is '%s' because it really isn't that hard to do.
+			It is tempting to make the default 'A+' as that isn't hard to do either,
+			but Perfect Forward Secrecy implies requiring https-only access which may
+			be overkill for some sites."""%(def_passing_grade,))
 p.add_argument('-f', '--force', action='store_true', dest='force', help="Force a new assessment")
 p.add_argument('-P', '--probe-period', action='store', dest='probe_period', type=int,
 		help="Override the default status cycle, in seconds")
@@ -226,7 +229,7 @@ p.add_argument('-m', '--max-attemtps', action='store', dest='max_attempts', type
 		help="Change the maximum number of query attempts.  Default is %d, use 0 to try forever"%(def_max_attempts,))
 p.add_argument('-u', '--base-url', action='store', dest='base_url', default=def_base_url,
 		help="Set the base url of the test site.  Default is '%s'"%(def_base_url,))
-p.add_argument('host', help='The site (FQDN only) to be tested')
+p.add_argument('host_under_test', help='The site (FQDN only) to be tested')
 
 args = p.parse_args()
 
@@ -257,9 +260,9 @@ if current is None or capacity is None:
 else:
 	load = current * 100 / capacity
 if load > 60:
-	fatal("Excessive load on %s, won't schedule an assessment of '%s'", args.base_url, args.host)
+	fatal("Excessive load on %s, won't schedule an assessment of '%s'", args.base_url, args.host_under_test)
 
-query = { 'host': args.host, 'all': 'done' }
+query = { 'host': args.host_under_test, 'all': 'done' }
 if args.publish:
 	query['publish'] = 'on'
 initial_query = query.copy()
@@ -272,7 +275,7 @@ state = lab.getmap('analyze', initial_query)
 duration = get_duration(state)
 status = state.get('status')
 
-verb("Initial SSLlabs status for host '%s' is '%s'", args.host, status)
+verb("Initial SSLlabs status for host '%s' is '%s'", args.host_under_test, status)
 while status != 'READY' and status != 'ERROR':
 	verb("Sleeping for %d sec%s", delay, '' if delay == 1 else '')
 	time.sleep(delay)
@@ -317,14 +320,14 @@ for ep in state['endpoints']:
 		min_grade = grade_num
 		grade = this_grade
 if not grade:
-	fatal("Could not determine any grade for '%s'", args.host)
+	fatal("Could not determine any grade for '%s'", args.host_under_test)
 if grade_num < passing_grade_num:
-	fatal("For '%s', the assessment returned a failing grade of '%s'", args.host, grade)
+	fatal("For '%s', the assessment returned a failing grade of '%s'", args.host_under_test, grade)
 test_age_mins = get_age(state) / 60.0
 if test_age_mins < 2:
 	test_age_mins = None
 verb("Total execution time: %.1f secs%s",
-		time.time() - program_start, '' if test_age_mins is None else ", %.0f mins ago"%(test_age_mins))
+		time.time() - program_start, '' if test_age_mins is None else ", original test ran %.0f mins ago"%(test_age_mins))
 if args.report_warnings and has_warnings:
 	report_func = warn
 	exit_code = 1
@@ -332,7 +335,7 @@ else:
 	report_func = info
 	exit_code = 0
 report_func("Host '%s' received grade '%s'%s%s%s",
-				args.host, grade,
+				args.host_under_test, grade,
 				' with WARNINGS' if has_warnings else '',
 				'' if duration is None else ', test ran for %.1f secs' % (duration,),
 				'' if test_age_mins is None else ", %.0f mins ago"%(test_age_mins))
