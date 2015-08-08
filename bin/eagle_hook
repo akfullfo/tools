@@ -1,0 +1,327 @@
+#!/usr/bin/env python
+# ________________________________________________________________________
+#
+#  Copyright (C) 2015 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+ 
+import os, sys, time, socket, struct, urlparse, json, argparse, logging
+from logging.handlers import SysLogHandler
+import BaseHTTPServer
+import xml.dom.minidom
+ 
+def_listen = '0.0.0.0:80'
+network_mask = '255.255.255.0'
+
+program = os.path.basename(os.path.splitext(sys.argv[0])[0])
+logging_name = program
+def_pidfile = '/var/run/' + program + '.pid'
+
+def daemonize(**params):
+	"""
+This is a simple daemonization method.  It just does a double fork() and the
+parent exits after closing a good clump of possibly open file descriptors.  The
+child redirects stdin from /dev/null and sets a new process group and session.
+If you need fancier, suggest you look at http://pypi.python.org/pypi/python-daemon/
+
+Application logging setup needs to be delayed until after daemonize() is called.
+
+Supported params:
+
+	redir	- Redirect stdin, stdout, and stderr to /dev/null.  Default
+		  is True, use "redir=False" to leave std files unchanged.
+
+	log     - logging function, default is no logging.  A logging function
+		  works best if you use stderr or a higher fd because these are
+		  closed last.  But note that all fds are closed or associated
+		  with /dev/null, so the log param is really only useful for
+		  debugging this function itself.  A caller needing logging
+		  should probably use syslog.
+"""
+	log = params.get('log')
+	redir = params.get('redir', True)
+
+	try:
+		if os.fork() != 0:
+			os._exit(0)
+	except Exception as e:
+		if log: log("First fork failed -- %s", str(e))
+		return False
+	try:
+		os.setsid()
+	except Exception as e:
+		if log: log("Setsid() failed -- %s", str(e))
+
+	try:
+		if os.fork() != 0:
+			os._exit(0)
+	except Exception as e:
+		if log: log("Second fork failed, pressing on -- %s", str(e))
+
+	try:
+		os.chdir('/')
+	except Exception as e:
+		if log: log("Chdir('/') failed -- %s", str(e))
+	if redir:
+		try: os.close(0)
+		except Exception as e:
+			if log: log("Stdin close failed -- %s", str(e))
+		try:
+			fd = os.open('/dev/null', os.O_RDONLY)
+		except Exception as e:
+			if log: log("Stdin open failed -- %s", str(e))
+		if fd != 0:
+			if log: log("Stdin open returned %d, should be 0", fd)
+		try: os.close(1)
+		except Exception as e:
+			if log: log("Stdout close failed -- %s", str(e))
+		try:
+			fd = os.open('/dev/null', os.O_WRONLY)
+		except Exception as e:
+			if log: log("Stdout open failed -- %s", str(e))
+		if fd != 1:
+			if log: log("Stdout open returned %d, should be 1", fd)
+
+	try:
+		os.setpgrp()
+	except Exception as e:
+		if log: log("Setpgrp failed -- %s", str(e))
+
+	if redir:
+		try: os.close(2)
+		except Exception as e:
+			if log: log("Stderr close failed -- %s", str(e))
+		try:
+			fd = os.dup(1)
+		except Exception as e:
+			if log: log("Stderr dup failed -- %s", str(e))
+		if fd != 2:
+			if log: log("Stderr dup returned %d, should be 2", fd)
+	for fd in range(3,50):
+		try: os.close(fd)
+		except: pass
+
+def cidr2mask(addr):
+	mask = long(0)
+	addr = int(addr)
+	if addr > 32 or addr < 0:
+		return None
+	while addr < 32:
+		mask = (mask << 1) | 1
+		addr += 1
+	return ~mask & 0xFFFFFFFF
+
+def ip2int(addr):
+	try:
+		return struct.unpack("!L", socket.inet_aton(addr))[0]
+	except:
+		return None
+
+def handle_hook(payload):
+	try:
+		request_dom = xml.dom.minidom.parseString(payload)
+	except Exception as e:
+		log.error("Payload parse failed -- %s", str(e))
+		log.error("Failed payload was ...")
+		if len(payload) > 1000:
+			payload = payload[:1000] + ' ...'
+		for line in str(payload).splitlines():
+			log.error("  ] %s", line)
+		return
+	log.info("Payload parsed successfully ...")
+	for line in request_dom.toprettyxml(indent="  ").splitlines():
+		line = line.rstrip()
+		if line:
+			log.info("  ] %s", line)
+ 
+class Hook(BaseHTTPServer.BaseHTTPRequestHandler):
+	server_version = "eagle_hook/1.0"
+	sys_version = ''
+
+	def format_addr(self, addr, showport=False):
+		if type(addr) is tuple and len(addr) == 2:
+			if showport:
+				return "%s:%d" % (addr[0], addr[1])
+			else:
+				return str(addr[0])
+		elif type(addr) is str:
+			return addr
+		else:
+			return str(addr)
+
+	def log_message(self, fmt, *fargs):
+		try:
+			msg = fmt.strip() % fargs
+		except Exception as e:
+			msg = "Error formatting '%s' -- %s" % (str(fmt), str(e))
+		try:
+			saddr = self.format_addr(self.server.server_address, showport=True)
+		except:
+			saddr = 'unknown'
+		try:
+			raddr = self.format_addr(self.client_address)
+		except:
+			raddr = 'unknown'
+		log.info("%s>%s %s", raddr, saddr, msg)
+
+	def send_resp(self, resp):
+		resp += '\r\n'
+		self.send_response(200)
+		self.send_header('Content-Length', str(len(resp)))
+		self.send_header('Content-Type', 'text/plain')
+		self.end_headers()
+		self.wfile.write(resp)
+
+	def check_address(self):
+		"""
+		Verify that the peer is in the allowed networks.
+	"""
+		client_addr = ip2int(self.client_address[0])
+		if authorized_addrs is None:
+			return True
+		for addr, mask in authorized_addrs:
+			if (addr & mask) == (client_addr & mask):
+				return True
+		log.warning("Silently rejecting connection -- unauthorized address from %s", self.format_addr(self.client_address))
+		return False
+		
+	def do_GET(self):
+		if self.check_address():
+			log.warning("Ignoring GET from %s", self.client_address[0])
+		self.send_resp('Ok')
+ 
+	def do_POST(self):
+		if not self.check_address():
+			log.warning("Ignoring GET from %s", self.client_address[0])
+			self.send_resp('Ok')
+
+		length = int(self.headers['Content-Length'])
+		log.info("Got %d bytes", length)
+	 
+		handle_hook(self.rfile.read(length).decode('utf-8'))
+	 
+		self.send_resp('OK')
+ 
+p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
+	description="""
+""")
+
+p.add_argument('-V', '--version', action='store_true', dest='version', help='Report version of package and exit.')
+p.add_argument('-v', '--verbose', action='store_true', dest='verbose', help='Verbose logging for debugging.')
+p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Quiet logging, warnings and errors only.')
+p.add_argument('-e', '--log-stderr', action='store_true', dest='log_stderr', help='Log to stderr instead of syslog.')
+p.add_argument('-b', '--background', action='store_true', dest='daemonize', help='Run in the background.')
+p.add_argument('-a', '--authorized-address', action='append', dest='authorized_addresses', metavar='NET',
+			help='Only allow contact from these hosts or networks')
+p.add_argument('-p', '--pidfile', action='store', dest='pidfile', metavar='FILE',
+			help='Pidfile path, default "%s", "-" means none.' %(def_pidfile,))
+p.add_argument('-l', '--listen', dest='listen', metavar='[address:]port', default=def_listen,
+			help='Listent address, default: ' + def_listen)
+
+args = p.parse_args()
+
+if args.version:
+	print(Hook.server_version)
+	sys.exit(0)
+
+if args.pidfile is None and args.daemonize:
+	pidfile = def_pidfile
+else:
+	pidfile = args.pidfile
+if pidfile == '' or pidfile == '-':
+	pidfile = None
+
+if pidfile:
+	pidfile = os.path.realpath(pidfile)
+
+authorized_addrs = None
+if args.authorized_addresses:
+	authorized_addrs = []
+	for addr in args.authorized_addresses:
+		f = addr.split('/', 1)
+		ip = f[0]
+		if len(f) > 1:
+			cidr = f[1]
+		else:
+			cidr = 32
+		authorized_addrs.append((ip2int(ip), cidr2mask(cidr)))
+
+if args.daemonize:
+	daemonize()
+
+if args.log_stderr:
+	log_handler = logging.StreamHandler()
+	log_formatter = logging.Formatter(fmt="%(asctime)s %(levelname)s %(message)s")
+else:
+	logparams = {}
+	for addr in ['/dev/log', '/var/run/log']:
+		if os.path.exists(addr):
+			logparams['address'] = addr
+			break
+	log_handler = SysLogHandler(**logparams)
+	log_formatter = logging.Formatter(fmt="%(name)s[%(process)d]: %(levelname)s %(message).1000s")
+
+log = logging.getLogger(logging_name)
+log_handler.setFormatter(log_formatter)
+log.addHandler(log_handler)
+
+if args.verbose:
+	log.setLevel(logging.DEBUG)
+elif args.quiet:
+	log.setLevel(logging.WARNING)
+else:
+	log.setLevel(logging.INFO)
+
+def_address, def_portstr = def_listen.split(':')
+
+address = None
+if args.listen.find(':') >= 0:
+	address, portstr = args.listen.split(':')
+else:
+	portstr = args.listen
+if not address:
+	address = def_address
+if not portstr:
+	portstr = def_portstr
+port = int(portstr)
+
+log.info("%s listening on %s:%d", Hook.server_version, address, port)
+
+if pidfile is not None:
+	try:
+		utils.pidclaim(pidfile)
+	except Exception as e:
+		log.critical('Fatal error -- %s', str(e), exc_info=args.verbose)
+		sys.exit(2)
+
+server_class = BaseHTTPServer.HTTPServer
+httpd = server_class((address, port), Hook)
+code = 0
+try:
+	httpd.serve_forever()
+except KeyboardInterrupt:
+	log.info("Exiting on interrupt")
+except Exception as e:
+	log.error("Exiting on exception -- %s", str(e), exc_info=True)
+	code = 2
+
+try:
+	httpd.server_close()
+except Exception as e:
+	log.warning("Exception while attempting to close server -- %s", str(e))
+	if not code:
+		code = 1
+
+sys.exit(code)
