@@ -17,10 +17,11 @@
 # ________________________________________________________________________
 #
  
-import os, sys, time, socket, struct, urlparse, json, argparse, logging
+import os, sys, time, re, socket, struct, urlparse, json, argparse, logging
 from logging.handlers import SysLogHandler
 import BaseHTTPServer
 import xml.dom.minidom
+from taskforce import utils
  
 def_listen = '0.0.0.0:80'
 network_mask = '255.255.255.0'
@@ -28,6 +29,7 @@ network_mask = '255.255.255.0'
 program = os.path.basename(os.path.splitext(sys.argv[0])[0])
 logging_name = program
 def_pidfile = '/var/run/' + program + '.pid'
+def_recordfile = '/home/akfullfo/rainforest.dat'
 
 def daemonize(**params):
 	"""
@@ -129,6 +131,110 @@ def ip2int(addr):
 	except:
 		return None
 
+def iso8601(tim = time.time(), terse=False):
+	frac = int((tim - int(tim)) * 1000.0 + 0.5)
+	tim = int(tim)
+	if frac >= 1000:
+		#  Handle case where the fraction was >= 0.9995
+		tim += 1
+		frac = 0
+	utc = time.gmtime(tim)
+	if terse:
+		fmt = "%Y%m%dT%H%M%S."
+	else:
+		fmt = "%Y-%m-%dT%H:%M:%S."
+	return time.strftime(fmt, utc) + ('%03d' % (frac,)) + 'Z'
+
+class Rainforest(object):
+
+	#  Match valid hex numbers
+	#
+	is_hex = re.compile(r'^0x[0-9a-fA-F]+$')
+
+	#  This is the number of seconds between Jan 1, 1970 UTC (unix epoch) and
+	#  Jan 1, 2000 UTC (rainforest epoch).
+	#
+	#  Except the meter seems to actually be on local time, so subtract 6hrs
+	#
+	time_t_offset_2000 = 946706400 - 21600
+
+	def __init__(self, dom):
+		self.dom = dom
+		log.debug("In %s", type(self).__name__)
+		for node in self.dom.getElementsByTagName('rainforest'):
+			if node.nodeType == node.ELEMENT_NODE and node.hasChildNodes():
+				for command in node.childNodes:
+					if command.nodeType != command.ELEMENT_NODE:
+						continue
+					if hasattr(self, command.nodeName) and callable(getattr(self, command.nodeName)):
+						log.debug("%s has command element '%s'", node.nodeName, command.nodeName)
+						getattr(self, command.nodeName)(command)
+					else:
+						log.info("%s has unknown element '%s'", node.nodeName, command.nodeName)
+
+	def InstantaneousDemand(self, node):
+		now = time.time()
+
+		time_stamp = None
+		demand = None
+		multiplier = None
+		divisor = None
+		for elem in node.childNodes:
+			if elem.nodeType != elem.ELEMENT_NODE:
+				continue
+			val = elem.childNodes[0].nodeValue.strip()
+			valstr = val
+			if self.is_hex.match(val):
+				try:
+					val = int(val, 0)
+					if val > 0x7FFFFFFF:
+						val -= 0x100000000
+				except:
+					pass
+			log.debug("InstantaneousDemand %s = %s", elem.nodeName, repr(val))
+			if elem.nodeName == 'TimeStamp':
+				time_stamp = val
+			elif elem.nodeName == 'Demand':
+				demand = val
+			elif elem.nodeName == 'Multiplier':
+				multiplier = val
+			elif elem.nodeName == 'Divisor':
+				divisor = val
+		if demand is None:
+			raise Exception("Missing 'Demand' in InstantaneousDemand")
+		if multiplier is None:
+			raise Exception("Missing 'Multiplier' in InstantaneousDemand")
+		if divisor is None:
+			raise Exception("Missing 'Divisor' in InstantaneousDemand")
+		load = float(demand) * multiplier / divisor
+		try:
+			clock_delta = ', clock delta %.3fs' % (time.time() - time_stamp - self.time_t_offset_2000, )
+		except Exception as e:
+			log.warning("Could not convert TimeStamp %s to clock delta -- %s", repr(time_stamp), str(e))
+			clock_delta = ''
+		log.debug("Load is %.3f kW%s", load, clock_delta)
+
+		with open(args.recordfile, 'a') as f:
+			f.write("%s\t%.3f\n" % (iso8601(now), load))
+
+	def DeviceInfo(self, node):
+		pass
+
+	def NetworkInfo(self, node):
+		pass
+
+	def CurrentSummationDelivered(self, node):
+		pass
+
+	def PriceCluster(self, node):
+		pass
+
+	def TimeCluster(self, node):
+		pass
+
+	def BlockPriceDetail(self, node):
+		pass
+
 def handle_hook(payload):
 	try:
 		request_dom = xml.dom.minidom.parseString(payload)
@@ -140,11 +246,12 @@ def handle_hook(payload):
 		for line in str(payload).splitlines():
 			log.error("  ] %s", line)
 		return
-	log.info("Payload parsed successfully ...")
+	log.debug("Payload parsed successfully ...")
 	for line in request_dom.toprettyxml(indent="  ").splitlines():
 		line = line.rstrip()
 		if line:
-			log.info("  ] %s", line)
+			log.debug("  ] %s", line)
+	Rainforest(request_dom)
  
 class Hook(BaseHTTPServer.BaseHTTPRequestHandler):
 	server_version = "eagle_hook/1.0"
@@ -174,13 +281,13 @@ class Hook(BaseHTTPServer.BaseHTTPRequestHandler):
 			raddr = self.format_addr(self.client_address)
 		except:
 			raddr = 'unknown'
-		log.info("%s>%s %s", raddr, saddr, msg)
+		log.debug("%s>%s %s", raddr, saddr, msg)
 
-	def send_resp(self, resp):
+	def send_resp(self, resp, content_type='text/plain', code=200):
 		resp += '\r\n'
-		self.send_response(200)
+		self.send_response(code)
 		self.send_header('Content-Length', str(len(resp)))
-		self.send_header('Content-Type', 'text/plain')
+		self.send_header('Content-Type', content_type)
 		self.end_headers()
 		self.wfile.write(resp)
 
@@ -208,23 +315,28 @@ class Hook(BaseHTTPServer.BaseHTTPRequestHandler):
 			self.send_resp('Ok')
 
 		length = int(self.headers['Content-Length'])
-		log.info("Got %d bytes", length)
+		log.debug("Got %d bytes", length)
 	 
-		handle_hook(self.rfile.read(length).decode('utf-8'))
-	 
-		self.send_resp('OK')
+		try:
+			handle_hook(self.rfile.read(length).decode('utf-8'))
+		except Exception as e:
+			log.error("XML processing failed -- %s", str(e))
+			self.send_resp('Bad data', code=400)
+		else:
+			self.send_resp('OK')
  
 p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
-	description="""
-""")
+	description="Track demand power from Eagle Rainforest device.")
 
+p.add_argument('-a', '--authaddr', action='append', dest='authaddrs', metavar='NET',
+			help='Only allow contact from these address')
 p.add_argument('-V', '--version', action='store_true', dest='version', help='Report version of package and exit.')
 p.add_argument('-v', '--verbose', action='store_true', dest='verbose', help='Verbose logging for debugging.')
 p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Quiet logging, warnings and errors only.')
 p.add_argument('-e', '--log-stderr', action='store_true', dest='log_stderr', help='Log to stderr instead of syslog.')
 p.add_argument('-b', '--background', action='store_true', dest='daemonize', help='Run in the background.')
-p.add_argument('-a', '--authorized-address', action='append', dest='authorized_addresses', metavar='NET',
-			help='Only allow contact from these hosts or networks')
+p.add_argument('-r', '--record-file', action='store', dest='recordfile', default=def_recordfile,
+			help='Record demand to file, default: ' + def_recordfile)
 p.add_argument('-p', '--pidfile', action='store', dest='pidfile', metavar='FILE',
 			help='Pidfile path, default "%s", "-" means none.' %(def_pidfile,))
 p.add_argument('-l', '--listen', dest='listen', metavar='[address:]port', default=def_listen,
@@ -247,9 +359,9 @@ if pidfile:
 	pidfile = os.path.realpath(pidfile)
 
 authorized_addrs = None
-if args.authorized_addresses:
+if args.authaddrs:
 	authorized_addrs = []
-	for addr in args.authorized_addresses:
+	for addr in args.authaddrs:
 		f = addr.split('/', 1)
 		ip = f[0]
 		if len(f) > 1:
