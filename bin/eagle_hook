@@ -168,38 +168,42 @@ class Rainforest(object):
 						continue
 					if hasattr(self, command.nodeName) and callable(getattr(self, command.nodeName)):
 						log.debug("%s has command element '%s'", node.nodeName, command.nodeName)
-						getattr(self, command.nodeName)(command)
+						info = {}
+						raw_info = {}
+						for elem in command.childNodes:
+							if elem.nodeType != elem.ELEMENT_NODE:
+								continue
+							tag = elem.nodeName
+							val = elem.childNodes[0].nodeValue.strip()
+							valstr = val
+							if self.is_hex.match(val):
+								try:
+									val = int(val, 0)
+									if val > 0x7FFFFFFF:
+										val -= 0x100000000
+								except:
+									pass
+							log.debug("%s %s = %s", command.nodeName, elem.nodeName, repr(val))
+							info[tag] = val
+							raw_info[tag] = valstr
+						info['_name'] = command.nodeName
+						info['_raw'] = raw_info
+						getattr(self, command.nodeName)(info)
 					else:
 						log.info("%s has unknown element '%s'", node.nodeName, command.nodeName)
 
-	def InstantaneousDemand(self, node):
+	def log_command(self, name, info, level=logging.DEBUG):
+		log.log(level, "%s ...", name)
+		for line in json.dumps(info, indent=4).splitlines():
+			log.log(level, "    %s", line)
+
+	def InstantaneousDemand(self, info):
 		now = time.time()
 
-		time_stamp = None
-		demand = None
-		multiplier = None
-		divisor = None
-		for elem in node.childNodes:
-			if elem.nodeType != elem.ELEMENT_NODE:
-				continue
-			val = elem.childNodes[0].nodeValue.strip()
-			valstr = val
-			if self.is_hex.match(val):
-				try:
-					val = int(val, 0)
-					if val > 0x7FFFFFFF:
-						val -= 0x100000000
-				except:
-					pass
-			log.debug("InstantaneousDemand %s = %s", elem.nodeName, repr(val))
-			if elem.nodeName == 'TimeStamp':
-				time_stamp = val
-			elif elem.nodeName == 'Demand':
-				demand = val
-			elif elem.nodeName == 'Multiplier':
-				multiplier = val
-			elif elem.nodeName == 'Divisor':
-				divisor = val
+		time_stamp = info.get('TimeStamp')
+		demand = info.get('Demand')
+		multiplier = info.get('Multiplier')
+		divisor = info.get('Divisor')
 		if demand is None:
 			raise Exception("Missing 'Demand' in InstantaneousDemand")
 		if multiplier is None:
@@ -217,23 +221,23 @@ class Rainforest(object):
 		with open(args.recordfile, 'a') as f:
 			f.write("%s\t%.3f\n" % (iso8601(now), load))
 
-	def DeviceInfo(self, node):
-		pass
+	def DeviceInfo(self, info):
+		self.log_command(sys._getframe().f_code.co_name, info)
 
-	def NetworkInfo(self, node):
-		pass
+	def NetworkInfo(self, info):
+		self.log_command(sys._getframe().f_code.co_name, info)
 
-	def CurrentSummationDelivered(self, node):
-		pass
+	def PriceCluster(self, info):
+		self.log_command(sys._getframe().f_code.co_name, info)
 
-	def PriceCluster(self, node):
-		pass
+	def CurrentSummationDelivered(self, info):
+		self.log_command(sys._getframe().f_code.co_name, info, level=logging.INFO)
 
-	def TimeCluster(self, node):
-		pass
+	def TimeCluster(self, info):
+		self.log_command(sys._getframe().f_code.co_name, info, level=logging.INFO)
 
-	def BlockPriceDetail(self, node):
-		pass
+	def BlockPriceDetail(self, info):
+		self.log_command(sys._getframe().f_code.co_name, info, level=logging.INFO)
 
 def handle_hook(payload):
 	try:
@@ -320,7 +324,7 @@ class Hook(BaseHTTPServer.BaseHTTPRequestHandler):
 		try:
 			handle_hook(self.rfile.read(length).decode('utf-8'))
 		except Exception as e:
-			log.error("XML processing failed -- %s", str(e))
+			log.error("XML processing failed -- %s", str(e), exc_info=True)
 			self.send_resp('Bad data', code=400)
 		else:
 			self.send_resp('OK')
