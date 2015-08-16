@@ -292,15 +292,40 @@ class Rainforest(object):
 			self.log.debug("%s", line.rstrip())
 		return (content, 'text/xml', 200)
 
-	def record_demand(self, ts, demand):
+	def read_meter(self, item, info):
+		name = info['_name']
+		sys_timestamp = info['_timestamp']
+
+		timestamp = info.get('TimeStamp')
+		value = info.get(item)
+		multiplier = info.get('Multiplier')
+		divisor = info.get('Divisor')
+		if value is None:
+			raise Exception("Missing '%s' in %s" % (item, name,))
+		if multiplier is None:
+			raise Exception("Missing 'Multiplier' in %s" % (name,))
+		if divisor is None:
+			raise Exception("Missing 'Divisor' in %s" % (name,))
+		result = float(value) * multiplier / divisor
+		try:
+			clock_delta = ', clock delta %.3fs' % (sys_timestamp - timestamp - self.time_t_offset_2000, )
+		except Exception as e:
+			self.log.warning("Could not convert TimeStamp %s to clock delta -- %s", repr(timestamp), str(e))
+			clock_delta = ''
+		self.log.debug("Result is %.3f kW%s", result, clock_delta)
+
+		return result
+
+	def record_data(self, tag, ts, value):
 		if not self.datadir:
 			return
 		iso_ts = iso8601(ts)
 		iso_date = iso_ts[:10]
-		fname = os.path.join(self.datadir, iso_date + '.dat')
+		log.debug("%s: %.3f", tag, value)
+		fname = os.path.join(self.datadir, iso_date + '.' + tag)
 
 		with open(fname, 'a') as f:
-			f.write("%s\t%.3f\n" % (iso_ts, demand))
+			f.write("%s\t%.3f\n" % (iso_ts, value))
 
 	def process(self, payload):
 		try:
@@ -318,6 +343,8 @@ class Rainforest(object):
 			line = line.rstrip()
 			if line:
 				self.log.debug("  ] %s", line)
+
+		resp = ('', 'text/plain', 200)
 
 		for node in dom.getElementsByTagName('rainforest'):
 			now = time.time()
@@ -384,49 +411,27 @@ class Rainforest(object):
 			return resp
 
 	def InstantaneousDemand(self, info):
-		time_stamp = info.get('TimeStamp')
-		demand = info.get('Demand')
-		multiplier = info.get('Multiplier')
-		divisor = info.get('Divisor')
-		if demand is None:
-			raise Exception("Missing 'Demand' in InstantaneousDemand")
-		if multiplier is None:
-			raise Exception("Missing 'Multiplier' in InstantaneousDemand")
-		if divisor is None:
-			raise Exception("Missing 'Divisor' in InstantaneousDemand")
-		load = float(demand) * multiplier / divisor
-		try:
-			clock_delta = ', clock delta %.3fs' % (time.time() - time_stamp - self.time_t_offset_2000, )
-		except Exception as e:
-			self.log.warning("Could not convert TimeStamp %s to clock delta -- %s", repr(time_stamp), str(e))
-			clock_delta = ''
-		self.log.debug("Load is %.3f kW%s", load, clock_delta)
-
-		self.record_demand(info['_timestamp'], load)
+		self.log_command(info)
+		self.record_data('demand', info['_timestamp'], self.read_meter('Demand', info))
 
 	def DeviceInfo(self, info):
 		self.log_command(info)
-		return ('', 'text/plain', 200)
 
 	def NetworkInfo(self, info):
 		self.log_command(info)
-		return ('', 'text/plain', 200)
 
 	def PriceCluster(self, info):
 		self.log_command(info)
-		return ('', 'text/plain', 200)
 
 	def CurrentSummationDelivered(self, info):
-		self.log_command(info, level=logging.INFO)
-		return ('', 'text/plain', 200)
+		self.log_command(info)
+		self.record_data('summation', info['_timestamp'], self.read_meter('SummationDelivered', info))
 
 	def TimeCluster(self, info):
-		self.log_command(info, level=logging.INFO)
-		return ('', 'text/plain', 200)
+		self.log_command(info)
 
 	def BlockPriceDetail(self, info):
 		self.log_command(info, level=logging.INFO)
-		return ('', 'text/plain', 200)
 
 class Hook(BaseHTTPServer.BaseHTTPRequestHandler):
 	server_version = "eagle_hook/1.0"
