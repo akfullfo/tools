@@ -174,7 +174,7 @@ class Rainforest(object):
 		},
 		'CurrentSummationDelivered': {
 			'event_name': 'summation',
-			'desired_period': 900
+			'desired_period': 300
 		},
 		'PriceCluster': {
 			#'event_name': 'price',
