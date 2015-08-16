@@ -23,14 +23,12 @@ import BaseHTTPServer
 import xml.dom.minidom
 from taskforce import utils
  
-def_listen = '0.0.0.0:80'
-network_mask = '255.255.255.0'
-
 program = os.path.basename(os.path.splitext(sys.argv[0])[0])
 logging_name = program
-def_pidfile = '/var/run/' + program + '.pid'
-def_recordfile = '/home/akfullfo/rainforest.dat'
-def_statefile = '/home/akfullfo/rainforest.state'
+
+def_listen = '0.0.0.0:8080'
+def_datadir = '/home/akfullfo/rainforest'
+def_pidfile = program + '.pid'
 
 def daemonize(**params):
 	"""
@@ -148,6 +146,10 @@ def iso8601(tim = time.time(), terse=False):
 
 class Rainforest(object):
 
+	#  File in datadir used to record current state
+	#
+	statefile_name = 'rainforest.state'
+
 	#  Match valid hex numbers
 	#
 	is_hex = re.compile(r'^0x[0-9a-fA-F]+$')
@@ -205,9 +207,20 @@ class Rainforest(object):
 		if not self.log:
 			self.log = logging.getLogger(__name__)
 			self.log.addHandler(logging.NullHandler())
-		self.statefile = params.get('statefile')
-		self.recordfile = params.get('recordfile')
-		self.state = self.load_state()
+		self.datadir = params.get('datadir')
+		if self.datadir:
+			if not os.access(self.datadir, os.W_OK | os.X_OK):
+				#  Throw this early because we don't actually attempt
+				#  access until a POST arrives.
+				#
+				raise Exception("Data directory '%s' is not writable" % (self.datadir))
+			self.statefile = os.path.join(self.datadir, self.statefile_name)
+			self.state = self.load_state()
+			self.recording = True
+		else:
+			self.statfile = None
+			self.state = {}
+			self.recording = False
 
 	def load_state(self):
 		if not self.statefile:
@@ -278,6 +291,16 @@ class Rainforest(object):
 		for line in content.splitlines():
 			self.log.debug("%s", line.rstrip())
 		return (content, 'text/xml', 200)
+
+	def record_demand(self, ts, demand):
+		if not self.datadir:
+			return
+		iso_ts = iso8601(ts)
+		iso_date = iso_ts[:10]
+		fname = os.path.join(self.datadir, iso_date + '.dat')
+
+		with open(fname, 'a') as f:
+			f.write("%s\t%.3f\n" % (iso_ts, demand))
 
 	def process(self, payload):
 		try:
@@ -379,9 +402,7 @@ class Rainforest(object):
 			clock_delta = ''
 		self.log.debug("Load is %.3f kW%s", load, clock_delta)
 
-		if self.recordfile:
-			with open(self.recordfile, 'a') as f:
-				f.write("%s\t%.3f\n" % (iso8601(info['_timestamp']), load))
+		self.record_demand(info['_timestamp'], load)
 
 	def DeviceInfo(self, info):
 		self.log_command(info)
@@ -482,19 +503,17 @@ class Hook(BaseHTTPServer.BaseHTTPRequestHandler):
 p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
 	description="Track demand power from Eagle Rainforest device.")
 
-p.add_argument('-a', '--authaddr', action='append', dest='authaddrs', metavar='NET',
-			help='Only allow contact from these address')
 p.add_argument('-V', '--version', action='store_true', dest='version', help='Report version of package and exit.')
 p.add_argument('-v', '--verbose', action='store_true', dest='verbose', help='Verbose logging for debugging.')
 p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Quiet logging, warnings and errors only.')
 p.add_argument('-e', '--log-stderr', action='store_true', dest='log_stderr', help='Log to stderr instead of syslog.')
 p.add_argument('-b', '--background', action='store_true', dest='daemonize', help='Run in the background.')
-p.add_argument('-r', '--record-file', action='store', dest='recordfile', default=def_recordfile,
-			help='Record demand to file, default: ' + def_recordfile)
-p.add_argument('-s', '--state-file', action='store', dest='statefile', default=def_statefile,
-			help='File to preserve last known state, default: ' + def_statefile)
+p.add_argument('-d', '--data-dir', action='store', dest='datadir', metavar='DIR', default=def_datadir,
+			help='Directory to record state and history, default: ' + def_datadir)
 p.add_argument('-p', '--pidfile', action='store', dest='pidfile', metavar='FILE',
-			help='Pidfile path, default "%s", "-" means none.' %(def_pidfile,))
+			help='Pidfile path, default "%s", "-" means none.' %(os.path.join(def_datadir, def_pidfile),))
+p.add_argument('-a', '--authaddr', action='append', dest='authaddrs', metavar='NET',
+			help='Only allow contact from these addresses.  May be used multiple times.  Default is to allow all.')
 p.add_argument('-l', '--listen', dest='listen', metavar='[address:]port', default=def_listen,
 			help='Listent address, default: ' + def_listen)
 
@@ -504,8 +523,10 @@ if args.version:
 	print(Hook.server_version)
 	sys.exit(0)
 
+pidfile = None
 if args.pidfile is None and args.daemonize:
-	pidfile = def_pidfile
+	if args.datadir:
+		pidfile = os.path.join(args.datadir, def_pidfile)
 else:
 	pidfile = args.pidfile
 if pidfile == '' or pidfile == '-':
@@ -574,7 +595,7 @@ if pidfile is not None:
 		log.critical('Fatal error -- %s', str(e), exc_info=args.verbose)
 		sys.exit(2)
 
-eagle = Rainforest(log=log, statefile=args.statefile, recordfile=args.recordfile)
+eagle = Rainforest(log=log, datadir=args.datadir)
 
 server_class = BaseHTTPServer.HTTPServer
 httpd = server_class((address, port), Hook)
