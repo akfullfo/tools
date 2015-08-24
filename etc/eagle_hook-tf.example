@@ -1,0 +1,13 @@
+{
+    'defines': {
+        "home": "/home/akfullfo",
+        "base": "{home}/rainforest",
+        "bin": "{home}/releases/external/tools/bin"
+    },
+    'tasks': {
+        "eagle_hook": {
+            'pidfile': "{base}/{Task_name}.pid",
+            'commands': { "start": ["{bin}/{Task_name}", "-d", "{base}"] }
+        }
+    }
+}
