@@ -41,20 +41,21 @@ Commands are always run via a shell.  The environment variable "TOUCHE_PATHS"
 will be set to the list of files that changed.
 """,
 	epilog="""
-These two examples do basically the same thing.
+These examples do basically the same thing ...
 
 	1.  while {program} -x /var/log/authlog; do
 		rsync -a /var/log/authlog archive-host:/archive/
 	    done
 
 	2.  {program} -c 'rsync -a $TOUCHE_PATHS archive-host:/archive/' /var/log/authlog
+ 
 """.format(program=program)
 )
 
 p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help="Don't report the path(s) that changed to stdout")
-p.add_argument('-x', '--exit', action='store_true',
-		help="Exit after any change.  If --command is specified, the command will be run first")
 p.add_argument('-c', '--command', action='store', help="Run the command when any path changes")
+p.add_argument('-x', '--exit', action='store_true',
+		help="Exit after any change.  If --command is specified, the command will be run before exiting")
 p.add_argument('-s', '--shell', action='store', help="Shell to use when running command")
 p.add_argument('-i', '--ignore', action='store_true',
 		help="Ignore the exit code of the command.  Normally %s exits if the command fails" % repr(program))
@@ -71,39 +72,45 @@ watch.add(args.paths)
 pset = poll.poll()
 pset.register(watch, poll.POLLIN)
 
-if args.shell is None:
+if not args.shell:
 	args.shell = True
 
-while True:
-	code = 0
-	paths = []
-	evlist = pset.poll(polling_mode_delay*1000.0)
-	if len(evlist) > 0:
-		for wo, mask in evlist:
-			for path in wo.get():
-				paths.append(path)
-				if not args.quiet:
-					print path
-	else:
-		watch.scan()
-		continue
-	if args.command:
-		try:
-			#  Hack in and exec if at all reasonable.
-			#
-			if hasattr(args.shell, 'endswith') and args.shell.endswith('sh') and not args.command.startswith('exec '):
-				command = 'exec ' + command
-			subprocess.check_call(args.command, shell=args.shell, env={'TOUCHE_PATHS': ' '.join(paths)})
-		except subprocess.CalledProcessError as e:
-			warn("%s", str(e.output))
-			code = e.returncode
-			if not args.ignore:
-				break
-		except Exception as e:
-			warn("Command execution failed -- %s", str(e))
-			code = 127
-			if not args.ignore:
-				break
-	if args.exit:
-		break
+try:
+	while True:
+		code = 0
+		paths = []
+		evlist = pset.poll(polling_mode_delay*1000.0)
+		if len(evlist) > 0:
+			for wo, mask in evlist:
+				for path in wo.get():
+					paths.append(path)
+		else:
+			watch.scan()
+			continue
+		if not args.quiet:
+			print ' '.join(paths)
+		if args.command:
+			try:
+				subprocess.check_call(args.command, shell=args.shell, env={'TOUCHE_PATHS': ' '.join(paths)})
+			except subprocess.CalledProcessError as e:
+				if e.output:
+					warn("%s", str(e.output))
+				else:
+					warn("Command exited %s", repr(e.returncode))
+				code = e.returncode
+				if code == 0:
+					code = 126
+				if not args.ignore:
+					break
+			except Exception as e:
+				warn("Command execution failed -- %s", str(e))
+				code = 127
+				if not args.ignore:
+					break
+		if args.exit:
+			break
+except KeyboardInterrupt:
+	exit(0)
+except Exception as e:
+	fatal("Unexpected exception -- %s", str(e))
 exit(code)
