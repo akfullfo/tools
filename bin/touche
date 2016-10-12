@@ -75,6 +75,8 @@ pset.register(watch, poll.POLLIN)
 if not args.shell:
 	args.shell = True
 
+export_env = os.environ.copy()
+
 try:
 	while True:
 		code = 0
@@ -91,7 +93,8 @@ try:
 			print ' '.join(paths)
 		if args.command:
 			try:
-				subprocess.check_call(args.command, shell=args.shell, env={'TOUCHE_PATHS': ' '.join(paths)})
+				export_env['TOUCHE_PATHS'] = ' '.join(paths)
+				subprocess.check_call(args.command, shell=args.shell, env=export_env)
 			except subprocess.CalledProcessError as e:
 				if e.output:
 					warn("%s", str(e.output))
