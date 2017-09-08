@@ -25,14 +25,14 @@ polling_mode_delay = 3
 program = os.path.basename(os.path.splitext(sys.argv[0])[0])
 
 def fatal(fmt, *fargs):
-	sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
-	sys.exit(2)
+    sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+    sys.exit(2)
 
 def warn(fmt, *fargs):
-	sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+    sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
 
 p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
-	description="""
+    description="""
 
 Efficiently wait for file changes (touches), either exiting or optionally
 running a command.
@@ -40,32 +40,34 @@ running a command.
 Commands are always run via a shell.  The environment variable "TOUCHE_PATHS"
 will be set to the list of files that changed.
 """,
-	epilog="""
+    epilog="""
 These examples do basically the same thing ...
 
-	1.  while {program} -x /var/log/authlog; do
-		rsync -a /var/log/authlog archive-host:/archive/
-	    done
+    1.  while {program} -x /var/log/authlog; do
+        rsync -a /var/log/authlog archive-host:/archive/
+        done
 
-	2.  {program} -c 'rsync -a $TOUCHE_PATHS archive-host:/archive/' /var/log/authlog
+    2.  {program} -c 'rsync -a $TOUCHE_PATHS archive-host:/archive/' /var/log/authlog
  
 """.format(program=program)
 )
 
-p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help="Don't report the path(s) that changed to stdout")
+p.add_argument('-q', '--quiet', action='store_true', help="Don't report the path(s) that changed to stdout")
 p.add_argument('-c', '--command', action='store', help="Run the command when any path changes")
 p.add_argument('-x', '--exit', action='store_true',
-		help="Exit after any change.  If --command is specified, the command will be run before exiting")
+        help="Exit after any change.  If --command is specified, the command will be run before exiting")
 p.add_argument('-s', '--shell', action='store', help="Shell to use when running command")
 p.add_argument('-i', '--ignore', action='store_true',
-		help="Ignore the exit code of the command.  Normally %s exits if the command fails" % repr(program))
+        help="Ignore the exit code of the command.  Normally %s exits if the command fails" % repr(program))
+p.add_argument('-d', '--dampen', nargs='?', action='store', metavar='secs', type=float, const=1.0, default=0.0,
+        help="Dampen the response for cases where double updates are done, as with 'vim'")
 p.add_argument('paths', nargs='+', metavar='path', help="Watch these for changes")
 
 args = p.parse_args()
 
 watch = watch_files.watch()
 if watch.get_mode() == watch_files.WF_POLLING:
-	warn("Operating in polling mode - change detection will take up to %d seconds", polling_mode_delay)
+    warn("Operating in polling mode - change detection will take up to %d seconds", polling_mode_delay)
 
 watch.add(args.paths)
 
@@ -73,47 +75,54 @@ pset = poll.poll()
 pset.register(watch, poll.POLLIN)
 
 if not args.shell:
-	args.shell = True
+    args.shell = True
 
 export_env = os.environ.copy()
 
+last_run = time.time()
 try:
-	while True:
-		code = 0
-		paths = []
-		evlist = pset.poll(polling_mode_delay*1000.0)
-		if len(evlist) > 0:
-			for wo, mask in evlist:
-				for path in wo.get():
-					paths.append(path)
-		else:
-			watch.scan()
-			continue
-		if not args.quiet:
-			print ' '.join(paths)
-		if args.command:
-			try:
-				export_env['TOUCHE_PATHS'] = ' '.join(paths)
-				subprocess.check_call(args.command, shell=args.shell, env=export_env)
-			except subprocess.CalledProcessError as e:
-				if e.output:
-					warn("%s", str(e.output))
-				else:
-					warn("Command exited %s", repr(e.returncode))
-				code = e.returncode
-				if code == 0:
-					code = 126
-				if not args.ignore:
-					break
-			except Exception as e:
-				warn("Command execution failed -- %s", str(e))
-				code = 127
-				if not args.ignore:
-					break
-		if args.exit:
-			break
+    while True:
+        code = 0
+        paths = []
+        evlist = pset.poll(polling_mode_delay*1000.0)
+        if len(evlist) > 0:
+            for wo, mask in evlist:
+                for path in wo.get():
+                    paths.append(path)
+        else:
+            watch.scan()
+            continue
+        now = time.time()
+        if last_run + args.dampen > now:
+            if not args.quiet:
+                print "Dampened " + ' '.join(paths)
+            continue
+        last_run = now
+        if not args.quiet:
+            print ' '.join(paths)
+        if args.command:
+            try:
+                export_env['TOUCHE_PATHS'] = ' '.join(paths)
+                subprocess.check_call(args.command, shell=args.shell, env=export_env)
+            except subprocess.CalledProcessError as e:
+                if e.output:
+                    warn("%s", str(e.output))
+                else:
+                    warn("Command exited %s", repr(e.returncode))
+                code = e.returncode
+                if code == 0:
+                    code = 126
+                if not args.ignore:
+                    break
+            except Exception as e:
+                warn("Command execution failed -- %s", str(e))
+                code = 127
+                if not args.ignore:
+                    break
+        if args.exit:
+            break
 except KeyboardInterrupt:
-	exit(0)
+    exit(0)
 except Exception as e:
-	fatal("Unexpected exception -- %s", str(e))
+    fatal("Unexpected exception -- %s", str(e))
 exit(code)
