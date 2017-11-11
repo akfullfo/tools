@@ -24,75 +24,75 @@ program = os.path.basename(os.path.splitext(sys.argv[0])[0])
 changelogfile = 'CHANGELOG.md'
 
 def fatal(fmt, *fargs):
-	sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
-	sys.exit(2)
+    sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+    sys.exit(2)
 
 def verb(fmt, *fargs):
-	if not args.quiet:
-		sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+    if not args.quiet:
+        sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
 
 def increment(oldver):
-	try:
-		parts = oldver.split('.')
-		lsp = int(parts.pop())
-		lsp += 1
-		parts.append(str(lsp))
-	except Exception as e:
-		fatal("Could not increment prior version '%s' -- %s", oldver, str(e))
-	return '.'.join(parts)
+    try:
+        parts = oldver.split('.')
+        lsp = int(parts.pop())
+        lsp += 1
+        parts.append(str(lsp))
+    except Exception as e:
+        fatal("Could not increment prior version '%s' -- %s", oldver, str(e))
+    return '.'.join(parts)
 
 def substatus(status):
-	"""
-	Format an exit status as text.  The subprocess module does not use Unix wait(2)
-	style exit status.  Instead, a negative exit implies death-by-signal, and a
-	non-negative status is the process exit code.
+    """
+    Format an exit status as text.  The subprocess module does not use Unix wait(2)
+    style exit status.  Instead, a negative exit implies death-by-signal, and a
+    non-negative status is the process exit code.
 """
-	if status < 0:
-		msg = 'died on SIG'+str(-status)
-	else:
-		msg = 'exited '+str(status)
-	return msg
+    if status < 0:
+        msg = 'died on SIG'+str(-status)
+    else:
+        msg = 'exited '+str(status)
+    return msg
 
 def run(cmd, output=None, replaces=[]):
-	params = {}
-	if type(cmd) != list:
-		cmd = str(cmd)
-		params['shell'] = True
-	if params.get('shell'):
-		cmdstr = "/bin/sh -c '%s'" % (cmd,)
-	else:
-		cmdstr = ''
-		for arg in cmd:
-			if cmdstr: cmdstr += ' '
-			cmdstr += pipes.quote(str(arg))
-	if args.dry_run:
-		verb("%s", cmdstr)
-		return
-	verb("Running <%s>", cmdstr)
-	try:
-		out = subprocess.check_output(cmd, **params)
-	except subprocess.CalledProcessError as e:
-		if e.output:
-			errtext = str(e.output).splitlines()
-			fatal("Command <%s> %s, reporting ...\n%s",
-				cmdstr, substatus(e.returncode), '\t'+('\n\t'.join(errtext))+'\n')
-		else:
-			fatal("Command <%s> %s", cmdstr, substatus(e.returncode))
-	except Exception as e:
-		fatal("Exec of <%s> failed -- %s", cmdstr, str(e))
-	for replace in replaces:
-		if len(replace) == 2:
-			out = re.sub(replace[0], replace[1], out)
-		else:
-			fatal("Bad replace tuple -- %s", str(replace))
-	if output is not None:
-		with open(output, 'w') as f:
-			f.write(out)
-	return out
+    params = {}
+    if type(cmd) != list:
+        cmd = str(cmd)
+        params['shell'] = True
+    if params.get('shell'):
+        cmdstr = "/bin/sh -c '%s'" % (cmd,)
+    else:
+        cmdstr = ''
+        for arg in cmd:
+            if cmdstr: cmdstr += ' '
+            cmdstr += pipes.quote(str(arg))
+    if args.dry_run:
+        verb("%s", cmdstr)
+        return
+    verb("Running <%s>", cmdstr)
+    try:
+        out = subprocess.check_output(cmd, **params)
+    except subprocess.CalledProcessError as e:
+        if e.output:
+            errtext = str(e.output).splitlines()
+            fatal("Command <%s> %s, reporting ...\n%s",
+                cmdstr, substatus(e.returncode), '\t'+('\n\t'.join(errtext))+'\n')
+        else:
+            fatal("Command <%s> %s", cmdstr, substatus(e.returncode))
+    except Exception as e:
+        fatal("Exec of <%s> failed -- %s", cmdstr, str(e))
+    for replace in replaces:
+        if len(replace) == 2:
+            out = re.sub(replace[0], replace[1], out)
+        else:
+            fatal("Bad replace tuple -- %s", str(replace))
+    if output is not None:
+        with open(output, 'w') as f:
+            f.write(out)
+    return out
 
 
 p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
-	description="""
+    description="""
 
 Publish a project to the 'PyPI' python package index.  This must be run from the
 top-level directory of the git repository tree and the project's directory name
@@ -112,15 +112,15 @@ exists as a tag.
 
 p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Report only errors.')
 p.add_argument('-V', '--version', action='store', dest='version',
-		help='Specify the next version.  Normally the old version will be incremented by one.')
+        help='Specify the next version.  Normally the old version will be incremented by one.')
 p.add_argument('-n', '--dry-run', action='store_true', dest='dry_run',
-		help='Report commands that would be run without running them')
+        help='Report commands that would be run without running them')
 p.add_argument('-k', '--rotate', action='store', dest='rotate', type=int, default=1,
-		help='Number of versions to retain.  Use zero to disable, default is 1.')
+        help='Number of versions to retain.  Use zero to disable, default is 1.')
 p.add_argument('-C', '--no-changelog', action='store_false', dest='changelog',
-		help='Skip generating and committing a new CHANGELOG.md')
+        help='Skip generating and committing a new CHANGELOG.md')
 p.add_argument('-I', '--no-increment', action='store_false', dest='increment',
-		help='Skip incrementing the version.  Ignored if --version is specfied.')
+        help='Skip incrementing the version.  Ignored if --version is specfied.')
 p.add_argument('-T', '--no-tag', action='store_false', dest='tag', help='Skip tagging the repository.')
 p.add_argument('-P', '--no-publish', action='store_false', dest='publish', help='Skip publishing to PyPI.')
 
@@ -133,67 +133,67 @@ repo = os.path.basename(os.path.realpath('.'))
 verfile = os.path.join(repo, '__init__.py')
 
 try:
-	with open(verfile, 'rt') as f:
-		verlines = f.readlines()
+    with open(verfile, 'rt') as f:
+        verlines = f.readlines()
 except Exception as e:
-	fatal("No init file '%s' available -- %s", verfile, str(e))
+    fatal("No init file '%s' available -- %s", verfile, str(e))
 
 #  Verify the requested bits exist
 if args.changelog:
-	run(['gitchangelog', '--help'])
+    run(['gitchangelog', '--help'])
 
 if args.publish:
-	pypirc = os.path.join(os.environ['HOME'], '.pypirc')
-	if not os.path.exists(pypirc):
-		fatal("No PyPI setup exists in %s", pypirc)
+    pypirc = os.path.join(os.environ['HOME'], '.pypirc')
+    if not os.path.exists(pypirc):
+        fatal("No PyPI setup exists in %s", pypirc)
 
 outlines = []
 vermatch = re.compile(r'''^__version__\s*=\s*["'](.*)["']\s*$''')
 for line in verlines:
-	m = vermatch.match(line)
-	if m:
-		curver = m.group(1)
-		if args.version is not None:
-			newver = args.version
-		elif args.increment:
-			newver = increment(curver)
-		else:
-			newver = curver
-		if curver == newver:
-			verb("Version '%s' unchanged", curver)
-		else:
-			verb("Version changing from '%s' to '%s'", curver, newver)
-			if not args.dry_run:
-				line = '__version__ = "%s"\n' % (newver,)
-	outlines.append(line)
+    m = vermatch.match(line)
+    if m:
+        curver = m.group(1)
+        if args.version is not None:
+            newver = args.version
+        elif args.increment:
+            newver = increment(curver)
+        else:
+            newver = curver
+        if curver == newver:
+            verb("Version '%s' unchanged", curver)
+        else:
+            verb("Version changing from '%s' to '%s'", curver, newver)
+            if not args.dry_run:
+                line = '__version__ = "%s"\n' % (newver,)
+    outlines.append(line)
 
 if verlines != outlines:
-	try:
-		with open(verfile, 'wt') as f:
-			f.write(''.join(outlines))
-	except Exception as e:
-		fatal("Init file '%s' update failed -- %s", verfile, str(e))
+    try:
+        with open(verfile, 'wt') as f:
+            f.write(''.join(outlines))
+    except Exception as e:
+        fatal("Init file '%s' update failed -- %s", verfile, str(e))
 
 if args.changelog:
-	version_str = '%s (%s)' % (newver, time.strftime('%Y-%m-%d'))
-	version_str += '\n' + '-' * len(version_str)
-	run(['gitchangelog'], output=changelogfile,
-		replaces=[(r'%%version%%\n-+', version_str), (r'\n- #(\d)', r'\n- Issue \1')])
+    version_str = '%s (%s)' % (newver, time.strftime('%Y-%m-%d'))
+    version_str += '\n' + '-' * len(version_str)
+    run(['gitchangelog'], output=changelogfile,
+        replaces=[(r'%%version%%\n-+', version_str), (r'\n- #(\d)', r'\n- Issue \1')])
 
 if args.increment or args.version is not None:
-	cmd = ['git', 'commit', verfile]
-	if args.changelog:
-		cmd.append(changelogfile)
-	cmd.extend(['-m', 'Release '+newver])
-	run(cmd)
-	run(['git', 'push'])
+    cmd = ['git', 'commit', verfile]
+    if args.changelog:
+        cmd.append(changelogfile)
+    cmd.extend(['-m', 'Release '+newver])
+    run(cmd)
+    run(['git', 'push'])
 
 if args.tag:
-	run(['git', 'tag', newver, '-m', 'PyPI release '+newver])
-	run(['git', 'push', '--tags', 'origin', 'master'])
+    run(['git', 'tag', newver, '-m', 'PyPI release '+newver])
+    run(['git', 'push', '--tags', 'origin', 'master'])
 
 if args.publish:
-	run(['python', 'setup.py', 'sdist'])
-	if args.rotate > 0:
-		run(['python', 'setup.py', 'rotate', '-k', str(args.rotate), '-m', '.tar.gz'])
-	run(['python', 'setup.py', 'sdist', 'upload'])
+    run(['python', 'setup.py', 'sdist'])
+    if args.rotate > 0:
+        run(['python', 'setup.py', 'rotate', '-k', str(args.rotate), '-m', '.tar.gz'])
+    run(['python', 'setup.py', 'sdist', 'upload'])

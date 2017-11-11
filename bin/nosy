@@ -23,7 +23,7 @@ NOSE_LOG_DEFAULT='warning'
 
 usage()
 {
-	cat >&2 <<EOT
+    cat >&2 <<EOT
 Usage: $P [--help] [--coverage] [--loglevel debug|info|warning|error] [nosetests_args]
 
        Run "nosetests" in the current directory with the
@@ -34,55 +34,55 @@ Usage: $P [--help] [--coverage] [--loglevel debug|info|warning|error] [nosetests
 
        $P requires a "tests" directory in the current directory.
 EOT
-	exit "${1:-100}"
+    exit "${1:-100}"
 }
 
 NOSE_LOG_LEVEL="$NOSE_LOG_DEFAULT"
 
 while [ "$#" -gt 0 ]; do
-	case "$1" in
-	-c|--coverage)
-		NOSE_WITH_COVERAGE=yes
-		export NOSE_WITH_COVERAGE
-		;;
-	-l|--loglevel)
-		shift
-		case "$1" in
-		d*)	NOSE_LOG_LEVEL="debug";;
-		i*)	NOSE_LOG_LEVEL="info";;
-		w*)	NOSE_LOG_LEVEL="warning";;
-		e*)	NOSE_LOG_LEVEL="error";;
-		c*)	NOSE_LOG_LEVEL="critical";;
-		*)
-			echo "$P: Unknown log level '$1'" >&2
-			usage 2
-			;;
-		esac
-		;;
-	-h|--help) usage 0;;
-	--)	shift; break;;
-	*)	break;;
-	esac
-	shift
+    case "$1" in
+    -c|--coverage)
+        NOSE_WITH_COVERAGE=yes
+        export NOSE_WITH_COVERAGE
+        ;;
+    -l|--loglevel)
+        shift
+        case "$1" in
+        d*) NOSE_LOG_LEVEL="debug";;
+        i*) NOSE_LOG_LEVEL="info";;
+        w*) NOSE_LOG_LEVEL="warning";;
+        e*) NOSE_LOG_LEVEL="error";;
+        c*) NOSE_LOG_LEVEL="critical";;
+        *)
+            echo "$P: Unknown log level '$1'" >&2
+            usage 2
+            ;;
+        esac
+        ;;
+    -h|--help) usage 0;;
+    --) shift; break;;
+    *)  break;;
+    esac
+    shift
 done
 
 if [ ! -d tests ]; then
-	echo "$P: No 'tests' subdirectory in current directory" >&2
-	exit 1
+    echo "$P: No 'tests' subdirectory in current directory" >&2
+    exit 1
 fi
 
 if [ -n "$PYTHONPATH" ]; then
-	PYTHONPATH="$PWD:$PYTHONPATH"
+    PYTHONPATH="$PWD:$PYTHONPATH"
 else
-	PYTHONPATH="$PWD"
+    PYTHONPATH="$PWD"
 fi
 export PYTHONPATH
 export NOSE_LOG_LEVEL
 
 coverargs=''
 if [ -n "$NOSE_WITH_COVERAGE" ]; then
-	coverage erase
-	coverargs='--with-coverage'
+    coverage erase
+    coverargs='--with-coverage'
 fi
 
 exec nosetests $coverargs "$@"

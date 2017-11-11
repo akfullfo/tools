@@ -48,7 +48,7 @@ These examples do basically the same thing ...
         done
 
     2.  {program} -c 'rsync -a $TOUCHE_PATHS archive-host:/archive/' /var/log/authlog
- 
+
 """.format(program=program)
 )
 

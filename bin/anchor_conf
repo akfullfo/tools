@@ -22,89 +22,89 @@ import sys, re, os, argparse
 program = os.path.basename(os.path.splitext(sys.argv[0])[0])
 
 def fatal(fmt, *fargs):
-	sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
-	sys.exit(2)
+    sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+    sys.exit(2)
 
 def verb(fmt, *fargs):
-	if not args.quiet:
-		sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+    if not args.quiet:
+        sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
 
 def update(doc, tag_start, tag_end, content):
-	ret = []
-	skipping = False
-	found = False
-	for line in list(doc):
-		if skipping:
-			if line == tag_end:
-				skipping = False
-				ret.extend(content)
-				found = True
-		elif line == tag_start:
-			skipping = True
-		else:
-			ret.append(line)
-	if not found:
-		ret.extend(content)
-	return ret
+    ret = []
+    skipping = False
+    found = False
+    for line in list(doc):
+        if skipping:
+            if line == tag_end:
+                skipping = False
+                ret.extend(content)
+                found = True
+        elif line == tag_start:
+            skipping = True
+        else:
+            ret.append(line)
+    if not found:
+        ret.extend(content)
+    return ret
 
 def process(doc, anchors, config_file):
-	config_base = os.path.basename(config_file)
-	tag_start = '<!-- CONFIG "%s" START linked by %s.  Keep comment to allow auto update -->\n' % (config_base, program)
-	tag_end = '<!-- CONFIG "%s" END linked by %s.  Keep comment to allow auto update -->\n' % (config_base, program)
-	with open(config_file, 'rt') as f:
-		conf = f.readlines()
-	linked_conf = [
-		tag_start,
-		"<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN %s TO UPDATE -->\n" % (program, ),
-		'<pre>\n'
-	]
-	sq_match = re.compile(r"'([ \w]+)'")
-	brace_match = re.compile(r"{(\w+)}")
-	pos = 0
-	for line in conf:
-		pos += 1
-		sq_list = {}
-		brace_list = {}
-		for m in sq_match.finditer(line):
-			val = m.group(1)
-			tag = re.sub(r'\W+', '-', val.lower())
-			if tag in anchors:
-				sq_list[tag] = val
-			else:
-				verb("Link '%s' from '%s' line %d has no anchor in document", tag, config_file, pos)
-		for m in brace_match.finditer(line):
-			tag = m.group(1)
-			if tag in anchors:
-				brace_list[tag] = tag
-		for tag, val in sq_list.items():
-			if args.double_quotes:
-				line = re.sub("'"+val+"'", '''"<a href="#%s">%s</a>"''' % (tag, val), line)
-			else:
-				line = re.sub("'"+val+"'", """'<a href="#%s">%s</a>'""" % (tag, val), line)
-		for tag, val in brace_list.items():
-			line = re.sub("{"+val+"}", """{<a href="#%s">%s</a>}""" % (tag, val), line)
-		linked_conf.append(line)
-	linked_conf.extend([
-		'</pre>\n',
-		tag_end
-	])
-	if args.dry_run:
-		print ''.join(linked_conf)
-	else:
-		doc = update(doc, tag_start, tag_end, linked_conf)
-	return doc
+    config_base = os.path.basename(config_file)
+    tag_start = '<!-- CONFIG "%s" START linked by %s.  Keep comment to allow auto update -->\n' % (config_base, program)
+    tag_end = '<!-- CONFIG "%s" END linked by %s.  Keep comment to allow auto update -->\n' % (config_base, program)
+    with open(config_file, 'rt') as f:
+        conf = f.readlines()
+    linked_conf = [
+        tag_start,
+        "<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN %s TO UPDATE -->\n" % (program, ),
+        '<pre>\n'
+    ]
+    sq_match = re.compile(r"'([ \w]+)'")
+    brace_match = re.compile(r"{(\w+)}")
+    pos = 0
+    for line in conf:
+        pos += 1
+        sq_list = {}
+        brace_list = {}
+        for m in sq_match.finditer(line):
+            val = m.group(1)
+            tag = re.sub(r'\W+', '-', val.lower())
+            if tag in anchors:
+                sq_list[tag] = val
+            else:
+                verb("Link '%s' from '%s' line %d has no anchor in document", tag, config_file, pos)
+        for m in brace_match.finditer(line):
+            tag = m.group(1)
+            if tag in anchors:
+                brace_list[tag] = tag
+        for tag, val in sq_list.items():
+            if args.double_quotes:
+                line = re.sub("'"+val+"'", '''"<a href="#%s">%s</a>"''' % (tag, val), line)
+            else:
+                line = re.sub("'"+val+"'", """'<a href="#%s">%s</a>'""" % (tag, val), line)
+        for tag, val in brace_list.items():
+            line = re.sub("{"+val+"}", """{<a href="#%s">%s</a>}""" % (tag, val), line)
+        linked_conf.append(line)
+    linked_conf.extend([
+        '</pre>\n',
+        tag_end
+    ])
+    if args.dry_run:
+        print ''.join(linked_conf)
+    else:
+        doc = update(doc, tag_start, tag_end, linked_conf)
+    return doc
 
 p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
-	description="""
+    description="""
 Extracts known anchors from an html or markdown document then looks for those
 anchors in a "taskforce" configuration file.  The configuration is converted
 to create links into the document.  The configuration is then injected into
 the document, replacing a prior edition.
 
 The document anchors recognized are in either the form:
-	<a name="ANCHOR"></a>
+    <a name="ANCHOR"></a>
 or:
-	^#+ ANCHOR #*$
+    ^#+ ANCHOR #*$
 
 In the later (title) form, the ANCHOR is canonicalized in the same way that
 github processes the markdown titles.
@@ -121,16 +121,16 @@ edited to move the configuration to the correct place.
 
 p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Report only errors.')
 p.add_argument('-p', '--preserve-single-quotes', action='store_false', dest='double_quotes',
-		help="Don't convert the single quotes used to tag keywords into double quotes")
+        help="Don't convert the single quotes used to tag keywords into double quotes")
 p.add_argument('-n', '--dry-run', action='store_true', dest='dry_run',
-		help='Instead of updating the document, just write the converted configuration to stdout')
+        help='Instead of updating the document, just write the converted configuration to stdout')
 p.add_argument('document', help='The html or markdown document to be processed')
 p.add_argument('config', nargs='+', help='The config files to be processed.  The document will be updated with each in turn')
 
 args = p.parse_args()
 
 with open(args.document, 'rt') as f:
-	doc = f.readlines()
+    doc = f.readlines()
 orig = list(doc)
 
 ml_anchor_match = re.compile(r'''<a name=["'](\w+)['"]></a>''')
@@ -138,25 +138,25 @@ md_anchor_match = re.compile(r'''^#+\s*(\w[ \w]*\w)\s*#*$''')
 pos = 0
 known_anchors = {}
 for line in doc:
-	pos += 1
-	for m in ml_anchor_match.finditer(line):
-		anchor = m.group(1)
-		if anchor in known_anchors:
-			verb("Duplicate hmtl anchor '%s' at line %d, previous at line %d", anchor, pos, known_anchors[anchor])
-		else:
-			known_anchors[anchor] = pos
-	for m in md_anchor_match.finditer(line):
-		anchor = re.sub(r'\W+', '-', m.group(1).lower())
-		if anchor in known_anchors:
-			verb("Duplicate markdown anchor '%s' at line %d, previous at line %d", anchor, pos, known_anchors[anchor])
-		else:
-			known_anchors[anchor] = pos
+    pos += 1
+    for m in ml_anchor_match.finditer(line):
+        anchor = m.group(1)
+        if anchor in known_anchors:
+            verb("Duplicate hmtl anchor '%s' at line %d, previous at line %d", anchor, pos, known_anchors[anchor])
+        else:
+            known_anchors[anchor] = pos
+    for m in md_anchor_match.finditer(line):
+        anchor = re.sub(r'\W+', '-', m.group(1).lower())
+        if anchor in known_anchors:
+            verb("Duplicate markdown anchor '%s' at line %d, previous at line %d", anchor, pos, known_anchors[anchor])
+        else:
+            known_anchors[anchor] = pos
 for fname in args.config:
-	doc = process(doc, known_anchors, fname)
+    doc = process(doc, known_anchors, fname)
 if not args.dry_run:
-	if doc == orig:
-		verb("No change in document '%s'", args.document)
-	else:
-		with open(args.document, 'wt') as f:
-			f.writelines(doc)
-		verb("Document '%s' updated", args.document)
+    if doc == orig:
+        verb("No change in document '%s'", args.document)
+    else:
+        with open(args.document, 'wt') as f:
+            f.writelines(doc)
+        verb("Document '%s' updated", args.document)

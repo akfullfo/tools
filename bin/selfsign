@@ -34,9 +34,9 @@ EOT
 rm -f $KEY_FILE $CRT_FILE
 openssl req -x509 -nodes -sha384 -newkey rsa:2048 -keyout $TMP.key -out $TMP.crt -days 10000 < $TMP.in > $TMP.out 2>&1
 if [ $? != 0 ]; then
-	echo "$P: openssl failed, reporting: $(cat $TMP.out)" >&2
-	rm -f $TMP.in $TMP.out
-	exit 1
+    echo "$P: openssl failed, reporting: $(cat $TMP.out)" >&2
+    rm -f $TMP.in $TMP.out
+    exit 1
 fi
 
 cat $TMP.key $TMP.crt
