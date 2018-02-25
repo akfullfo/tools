@@ -70,7 +70,7 @@ def run(cmd, output=None, replaces=[]):
         return
     verb("Running <%s>", cmdstr)
     try:
-        out = subprocess.check_output(cmd, **params)
+        out = subprocess.check_output(cmd, **params).decode('utf-8')
     except subprocess.CalledProcessError as e:
         if e.output:
             errtext = str(e.output).splitlines()
