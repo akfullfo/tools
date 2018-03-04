@@ -155,7 +155,6 @@ def parse_scan(section):
         scan['duration'] = parse_duration(m.group(3))
         scan['errs'] = int(m.group(4))
         scan['date'] = parse_timestamp(m.group(5))
-        scan['age'] = time.time() - scan['date']
     m = re.match(r'^(.*) in progress since \S+\s+(\S+\s+\S+\s+\S+\s+\S+)\s*(\S+) scanned out of (\S+) at (\S+)/s', text)
     if m:
         scan['op'] = m.group(1)
@@ -163,7 +162,6 @@ def parse_scan(section):
         scan['size'] = parse_size(m.group(3))
         scan['total'] = parse_size(m.group(4))
         scan['rate'] = parse_size(m.group(5))
-        scan['age'] = 0
     if 'op' not in scan:
         scan['op'] = 'unparsed'
     if scan['op'].startswith('scrub '):
@@ -245,8 +243,9 @@ If is run via cron, status will be sent to the cron user's email.
 If no pools are listed, status is checked for all pools.
 """)
 
-p.add_argument('--status-text', metavar='path', help='File containing "zpool status" output, used for testing')
+p.add_argument('-R', '--record', action='store_true', help='Record state changes in the history subdirectory')
 p.add_argument('-d', '--status-dir', metavar='path', help='Directory where state for each pool is retained')
+p.add_argument('--status-text', metavar='path', help='File containing "zpool status" output, used for testing')
 p.add_argument('pool', nargs='*', default=[], help='One or more pools to be processed')
 
 args = p.parse_args()
@@ -279,6 +278,9 @@ for pool_name in sorted(pools):
     except:
         prev_status = {}
 
+    if prev_status == curr_status:
+        continue
+
     if prev_status.get('state') != curr_status.get('state'):
         exit_code = 1
         message("Pool %r changed state from %r to %r", pool_name, prev_status.get('state'), curr_status.get('state'))
@@ -288,24 +290,21 @@ for pool_name in sorted(pools):
         exit_code = 1
         message("Pool %r changed scan operation from %r to %r", pool_name, prev_op, curr_op)
 
-    if prev_status == curr_status:
-        continue
-
     if not prev_status:
         with open(status_file, 'w') as f:
             json.dump(prev_status, f, indent=4, sort_keys=True)
     mtime = os.path.getmtime(status_file)
 
-    try:
-        save_file = os.path.join(hist_dir, time.strftime("%Y%m%d-%H%M.json", time.localtime(mtime)))
-        os.rename(status_file, save_file)
-    except Exception as e:
-        error("Rename of %r failed -- %s", save_file, e)
-    try:
-        with open(status_file, 'w') as f:
-            json.dump(curr_status, f, indent=4, sort_keys=True)
-    except Exception as e:
-        error("Save of %r failed -- %s", save_file, e)
-        continue
+    if args.record:
+        try:
+            save_file = os.path.join(hist_dir, time.strftime("%Y%m%d-%H%M.json", time.localtime(mtime)))
+            os.rename(status_file, save_file)
+        except Exception as e:
+            error("Rename of %r failed -- %s", save_file, e)
+        try:
+            with open(status_file, 'w') as f:
+                json.dump(curr_status, f, indent=4, sort_keys=True)
+        except Exception as e:
+            error("Save of %r failed -- %s", save_file, e)
 
 sys.exit(exit_code)
