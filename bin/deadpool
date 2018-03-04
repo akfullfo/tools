@@ -1,0 +1,311 @@
+#!/usr/bin/env python
+# ________________________________________________________________________
+#
+#  Copyright (C) 2018 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+
+import sys, os, time, re, subprocess, argparse, json
+
+program = 'deadpool'
+
+status_base = '/var/local/zfs/status'
+
+re_section = re.compile(r'^\s*(\w+):\s*(.*)$')
+
+duration_scale = {
+        'w': 7*24*60*60,
+        'd': 24*60*60,
+        'h': 60*60,
+        'm': 60,
+        's': 1
+}
+size_scale = {
+        'Z': 1024*1024*1024*1024*1024*1024*1024,
+        'E': 1024*1024*1024*1024*1024*1024,
+        'P': 1024*1024*1024*1024*1024,
+        'T': 1024*1024*1024*1024,
+        'G': 1024*1024*1024,
+        'M': 1024*1024,
+        'K': 1024,
+        'B': 1,
+}
+
+def error(fmt, *fargs):
+    sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+
+def message(fmt, *fargs):
+    sys.stdout.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+
+def parse_size(val):
+    size = 0
+    fields = re.split(r'([A-Z])', val)
+    while fields:
+        try:
+            num = fields.pop(0)
+            if num == '':
+                continue
+            num = float(num)
+        except Exception as e:
+            error("Invalid size %r, bad number", val)
+            return None
+        if fields:
+            scale = str(fields.pop(0))
+            if scale in size_scale:
+                size += num * size_scale[scale]
+            else:
+                error("Invalid size %r, bad scale char %r", val, scale)
+                return None
+        else:
+            size += num
+    return int(size)
+
+def parse_duration(val):
+    secs = 0
+    fields = re.split(r'([a-z])', val)
+    while fields:
+        try:
+            num = fields.pop(0)
+            if num == '':
+                continue
+            num = int(num)
+        except Exception as e:
+            error("Invalid duration %r, bad number", val)
+            return None
+        if fields:
+            scale = str(fields.pop(0))
+            if scale in duration_scale:
+                secs += num * duration_scale[scale]
+            else:
+                error("Invalid duration %r, bad scale char %r", val, scale)
+                return None
+    return secs
+
+def parse_timestamp(val):
+    return time.mktime(time.strptime(val, "%b %d %H:%M:%S %Y"))
+
+class Config(object):
+    def __init__(self):
+        self.last_pool = None
+        self.last_vdev = None
+        self.phys_dev = 0
+
+    def __call__(self, lines):
+        config = {}
+        for line in lines:
+            self.parse(config, line)
+        return config
+
+    def parse(self, config, line):
+        if line.endswith('CKSUM'):
+            return
+        line = line.replace('\t', '')
+        sline = line.strip()
+        if not sline:
+            return
+        fields = sline.split()
+        if len(fields) < 5:
+            error("Bad config line: %s", sline)
+            return
+        name, status, read, write, cksum  = fields[:5]
+        message = ' '.join(fields[5:])
+
+        info = {'status': status, 'read': parse_size(read), 'write': parse_size(write), 'cksum': parse_size(cksum)}
+        if message:
+            info['message'] = message
+
+        if line.startswith('    '):
+            info['slot'] = self.phys_dev
+            self.phys_dev += 1
+            config[self.last_pool][self.last_vdev][name] = info
+        elif line.startswith('  '):
+            if name not in config[self.last_pool]:
+                self.last_vdev = name
+                config[self.last_pool][self.last_vdev] = info
+        else:
+            if name not in config:
+                self.last_pool = name
+                config[self.last_pool] = info
+
+def parse_default(section):
+    return ' '.join(x.strip() for x in section)
+
+def parse_config(section):
+    return Config()(section)
+
+def parse_scan(section):
+    text = parse_default(section)
+    scan = {'text': text}
+    m = re.match(r'^(.*) (\S+) in (\S+) with (\S+) errors? on \S+\s+(\S+\s+\S+\s+\S+\s+\S+)\s*$', text)
+    if m:
+        scan['op'] = m.group(1)
+        scan['size'] = parse_size(m.group(2))
+        scan['duration'] = parse_duration(m.group(3))
+        scan['errs'] = int(m.group(4))
+        scan['date'] = parse_timestamp(m.group(5))
+        scan['age'] = time.time() - scan['date']
+    m = re.match(r'^(.*) in progress since \S+\s+(\S+\s+\S+\s+\S+\s+\S+)\s*(\S+) scanned out of (\S+) at (\S+)/s', text)
+    if m:
+        scan['op'] = m.group(1)
+        scan['date'] = parse_timestamp(m.group(2))
+        scan['size'] = parse_size(m.group(3))
+        scan['total'] = parse_size(m.group(4))
+        scan['rate'] = parse_size(m.group(5))
+        scan['age'] = 0
+    if 'op' not in scan:
+        scan['op'] = 'unparsed'
+    if scan['op'].startswith('scrub '):
+        scan['op'] = scan['op'][6:]
+    return scan
+
+parsers = {
+        None:   parse_default,
+    'config':   parse_config,
+      'scan':   parse_scan,
+}
+
+def status(out=None):
+    if out is None:
+        try:
+            cmd = ['zpool', 'status']
+            cmdname = ' '.join(cmd)
+            p = subprocess.Popen(cmd,
+                        executable='/usr/sbin/zpool',
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE)
+            (out, err) = p.communicate()
+            code = p.wait()
+        except Exception as e:
+            error("%r failed -- %s", cmdname, e)
+
+        if code != 0:
+            error("%r exited %d -- %s", cmdname, ((code >> 8) & 0xff, err.strip()))
+    else:
+        cmdname = '(sample)'
+
+    pools = {}
+    pool = None
+    section = None
+    lineno = 0
+    for line in out.splitlines():
+        lineno += 1
+        line = line.rstrip()
+        if not line:
+            continue
+        m = re_section.match(line)
+        tag = None
+        if m:
+            tag = m.group(1)
+            val = m.group(2)
+            if tag == 'pool':
+                pool = val
+                pools[pool] = {}
+                continue
+        if pool:
+            if tag:
+                if section == tag:
+                    error("%r line %d repeated tag %r in: %s", cmdname, lineno, tag, line)
+                section = tag
+                pools[pool][section] = [val]
+            elif section:
+                pools[pool][section].append(line)
+            else:
+                error("%r line %d continued text outside a section: %s", cmdname, lineno, line)
+        else:
+            error("%r line %d unrecognised line outside a pool: %s", cmdname, lineno, line)
+    for name, pool in pools.items():
+        for section in pool:
+            if section in parsers:
+                parser = parsers[section]
+            else:
+                parser = parsers[None]
+            pool[section] = parser(pool[section])
+    return pools
+
+p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
+    description="""
+Probes for status of one or more ZFS zpools.  Status changes are reported,
+and the "zpool status" output at the time of the change is saved in a
+history directory.
+
+If is run via cron, status will be sent to the cron user's email.
+
+If no pools are listed, status is checked for all pools.
+""")
+
+p.add_argument('--status-text', metavar='path', help='File containing "zpool status" output, used for testing')
+p.add_argument('-d', '--status-dir', metavar='path', help='Directory where state for each pool is retained')
+p.add_argument('pool', nargs='*', default=[], help='One or more pools to be processed')
+
+args = p.parse_args()
+
+sample_text = None
+if args.status_text:
+    with open(args.status_text, 'r') as f:
+        sample_text = f.read()
+
+pools = status(out=sample_text)
+
+if sample_text:
+    print(json.dumps(pools, sort_keys=True, indent=2))
+    exit(0)
+
+exit_code = 0
+
+for pool_name in sorted(pools):
+    curr_status = pools[pool_name]
+    status_dir = os.path.join(status_base, pool_name)
+    status_file = os.path.join(status_dir, 'current.json')
+    hist_dir = os.path.join(status_dir, 'history')
+    if not os.path.isdir(status_dir):
+        os.makedirs(status_dir)
+    if not os.path.isdir(hist_dir):
+        os.makedirs(hist_dir)
+    try:
+        with open(status_file, 'r') as f:
+            prev_status = json.load(f)
+    except:
+        prev_status = {}
+
+    if prev_status.get('state') != curr_status.get('state'):
+        exit_code = 1
+        message("Pool %r changed state from %r to %r", pool_name, prev_status.get('state'), curr_status.get('state'))
+    prev_op = prev_status.get('scan', {}).get('op')
+    curr_op = curr_status.get('scan', {}).get('op')
+    if prev_op != curr_op:
+        exit_code = 1
+        message("Pool %r changed scan operation from %r to %r", pool_name, prev_op, curr_op)
+
+    if prev_status == curr_status:
+        continue
+
+    if not prev_status:
+        with open(status_file, 'w') as f:
+            json.dump(prev_status, f, indent=4, sort_keys=True)
+    mtime = os.path.getmtime(status_file)
+
+    try:
+        save_file = os.path.join(hist_dir, time.strftime("%Y%m%d-%H%M.json", time.localtime(mtime)))
+        os.rename(status_file, save_file)
+    except Exception as e:
+        error("Rename of %r failed -- %s", save_file, e)
+    try:
+        with open(status_file, 'w') as f:
+            json.dump(curr_status, f, indent=4, sort_keys=True)
+    except Exception as e:
+        error("Save of %r failed -- %s", save_file, e)
+        continue
+
+sys.exit(exit_code)
