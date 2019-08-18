@@ -1,10 +1,27 @@
 #!/usr/bin/env python3
+# ________________________________________________________________________
+#
+#  Copyright (C) 2019 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
 
 import os
 import time
-import sys
 import re
 import shutil
+import errno
 import logging
 import logging.handlers
 import subprocess
@@ -30,6 +47,7 @@ crf_quality = 30
 
 re_is_daydir = re.compile(r'^(\d{4})_(\d{2})_(\d{2})-\d{4}_\d{2}_\d{2}$')
 
+
 def parse_args(argv, log=None):
     p = argparse.ArgumentParser(
             formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -52,17 +70,17 @@ def parse_args(argv, log=None):
     p.add_argument('-q', '--quiet', action='store_true', help="Quiet logging, errors and warnings only")
     p.add_argument('-e', '--log-stderr', action='store_true', help="Log to stderr, default is syslog")
     p.add_argument('-r', '--retain', action='store', type=int, metavar='days', default=def_retain,
-            help="Days to retain original images, use 0 for forever, default %r days" % def_retain)
+                    help="Days to retain original images, use 0 for forever, default %r days" % def_retain)
     p.add_argument('-R', '--reprocess', action='store', type=int, metavar='days', default=def_reprocess,
-            help="Limit reprocessing to this many days on any change, use 0 for all, default %r days" % def_reprocess)
+                    help="Limit reprocessing to this many days on any change, use 0 for all, default %r days" % def_reprocess)
     p.add_argument('-i', '--idle', action='store', type=int, metavar='secs', default=def_idle,
-            help="Delay processing until there have been no events for this period, default %r secs" % def_idle)
+                    help="Delay processing until there have been no events for this period, default %r secs" % def_idle)
     p.add_argument('-d', '--destdir', action='store', metavar='path', default=def_destdir,
-            help="Directory to output generated movies and index, default %r" % def_destdir)
+                    help="Directory to output generated movies and index, default %r" % def_destdir)
     p.add_argument('-b', '--basedir', action='store', metavar='path', default=def_basedir,
-            help="Base directory containing the camera name, default %r" % def_basedir)
+                    help="Base directory containing the camera name, default %r" % def_basedir)
     p.add_argument('-N', '--no-initial', action='store_false', dest='initial',
-            help="Don't perform immediate processing, wait for an event")
+                    help="Don't perform immediate processing, wait for an event")
     p.add_argument('-1', '--once', action='store_true', help="Exit after initial processing")
     p.add_argument('-f', '--force', action='store_true', help="Regenerate videos even if they appear up-to-date")
     p.add_argument('name', nargs=1, action='store', help="Camera name")
@@ -95,10 +113,12 @@ def parse_args(argv, log=None):
 
     return args, log
 
+
 def hik_dir(tim=None):
     if tim is None:
         tim = time.time()
     return time.strftime("%Y_%m_%d-%Y_%m_%d", time.localtime(tim))
+
 
 def run(cmd):
     try:
@@ -113,6 +133,7 @@ def run(cmd):
     except Exception as e:
         log.error("%s failed -- %s", cmd[0], e)
     return None
+
 
 def newest(dpath, ext=None):
     newest_mtime = None
@@ -132,8 +153,9 @@ def newest(dpath, ext=None):
         newest_mtime = os.path.getmtime(dpath)
         newest_path = dpath
 
-    log.debug("Newest%s in %r is %r (%r)", '' if ext is None else ' '+str(ext), dpath, newest_path, newest_mtime)
+    log.debug("Newest%s in %r is %r (%r)", '' if ext is None else ' ' + str(ext), dpath, newest_path, newest_mtime)
     return newest_mtime, newest_path
+
 
 def process(daydir, args, set_latest=False):
     camera = args.name[0]
@@ -202,6 +224,7 @@ def process(daydir, args, set_latest=False):
             except Exception as e:
                 log.warning("Failed to create new latest %r -- %s", latest, e)
 
+
 def is_daydir(path):
     if os.path.isdir(path):
         base, dname = os.path.split(path)
@@ -210,8 +233,10 @@ def is_daydir(path):
             return path
     return None
 
+
 def get_daydirs(base):
     return sorted(path for path in map(lambda x: is_daydir(os.path.join(base, x)), os.listdir(base)) if path is not None)
+
 
 def scan(cameradir, args):
     daydirs = get_daydirs(cameradir)
@@ -228,6 +253,7 @@ def scan(cameradir, args):
         log.debug("Reprocess limited to %r: %r", args.reprocess, daydirs)
     for path in daydirs:
         process(path, args, set_latest=(path == daydirs[-1]))
+
 
 def watch(camera, cameradir, args):
     exit_code = 0
@@ -268,6 +294,7 @@ def watch(camera, cameradir, args):
         exit(exit_code)
     time.sleep(2)
 
+
 def main(argv=None, ilog=None):
     global log
     args, log = parse_args(argv, log=ilog)
@@ -281,5 +308,6 @@ def main(argv=None, ilog=None):
     log.info("Starting in %s ...", camerabase)
     while True:
         watch(camera, camerabase, args)
+
 
 main()
