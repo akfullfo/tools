@@ -17,19 +17,28 @@
 # ________________________________________________________________________
 #
 
-import sys, re, os, time, pipes, subprocess, argparse
+import sys
+import re
+import os
+import time
+import pipes
+import subprocess
+import argparse
 
 program = os.path.basename(os.path.splitext(sys.argv[0])[0])
 
 changelogfile = 'CHANGELOG.md'
 
+
 def fatal(fmt, *fargs):
     sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
     sys.exit(2)
 
+
 def verb(fmt, *fargs):
     if not args.quiet:
         sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+
 
 def increment(oldver):
     try:
@@ -38,20 +47,22 @@ def increment(oldver):
         lsp += 1
         parts.append(str(lsp))
     except Exception as e:
-        fatal("Could not increment prior version '%s' -- %s", oldver, str(e))
+        fatal("Could not increment prior version '%s' -- %s", oldver, e)
     return '.'.join(parts)
+
 
 def substatus(status):
     """
-    Format an exit status as text.  The subprocess module does not use Unix wait(2)
-    style exit status.  Instead, a negative exit implies death-by-signal, and a
-    non-negative status is the process exit code.
-"""
+        Format an exit status as text.  The subprocess module does not use Unix wait(2)
+        style exit status.  Instead, a negative exit implies death-by-signal, and a
+        non-negative status is the process exit code.
+    """
     if status < 0:
-        msg = 'died on SIG'+str(-status)
+        msg = 'died on SIG' + str(-status)
     else:
-        msg = 'exited '+str(status)
+        msg = 'exited ' + str(status)
     return msg
+
 
 def run(cmd, output=None, replaces=[]):
     params = {}
@@ -63,7 +74,8 @@ def run(cmd, output=None, replaces=[]):
     else:
         cmdstr = ''
         for arg in cmd:
-            if cmdstr: cmdstr += ' '
+            if cmdstr:
+                cmdstr += ' '
             cmdstr += pipes.quote(str(arg))
     if args.dry_run:
         verb("%s", cmdstr)
@@ -75,16 +87,16 @@ def run(cmd, output=None, replaces=[]):
         if e.output:
             errtext = str(e.output).splitlines()
             fatal("Command <%s> %s, reporting ...\n%s",
-                cmdstr, substatus(e.returncode), '\t'+('\n\t'.join(errtext))+'\n')
+                    cmdstr, substatus(e.returncode), '\t' + ('\n\t'.join(errtext)) + '\n')
         else:
             fatal("Command <%s> %s", cmdstr, substatus(e.returncode))
     except Exception as e:
-        fatal("Exec of <%s> failed -- %s", cmdstr, str(e))
+        fatal("Exec of <%s> failed -- %s", cmdstr, e)
     for replace in replaces:
         if len(replace) == 2:
             out = re.sub(replace[0], replace[1], out)
         else:
-            fatal("Bad replace tuple -- %s", str(replace))
+            fatal("Bad replace tuple -- %s", replace)
     if output is not None:
         with open(output, 'w') as f:
             f.write(out)
@@ -92,7 +104,7 @@ def run(cmd, output=None, replaces=[]):
 
 
 p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
-    description="""
+                            description="""
 
 Publish a project to the 'PyPI' python package index.  This must be run from the
 top-level directory of the git repository tree and the project's directory name
@@ -110,17 +122,17 @@ without disabling the tagging will cause an error if the current version already
 exists as a tag.
 """)
 
-p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Report only errors.')
-p.add_argument('-V', '--version', action='store', dest='version',
-        help='Specify the next version.  Normally the old version will be incremented by one.')
-p.add_argument('-n', '--dry-run', action='store_true', dest='dry_run',
-        help='Report commands that would be run without running them')
-p.add_argument('-k', '--rotate', action='store', dest='rotate', type=int, default=1,
-        help='Number of versions to retain.  Use zero to disable, default is 1.')
+p.add_argument('-q', '--quiet', action='store_true', help='Report only errors.')
+p.add_argument('-V', '--version', action='store',
+                help='Specify the next version.  Normally the old version will be incremented by one.')
+p.add_argument('-n', '--dry-run', action='store_true',
+                help='Report commands that would be run without running them')
+p.add_argument('-k', '--rotate', action='store', type=int, default=1,
+                help='Number of versions to retain.  Use zero to disable, default is 1.')
 p.add_argument('-C', '--no-changelog', action='store_false', dest='changelog',
-        help='Skip generating and committing a new CHANGELOG.md')
+                help='Skip generating and committing a new CHANGELOG.md')
 p.add_argument('-I', '--no-increment', action='store_false', dest='increment',
-        help='Skip incrementing the version.  Ignored if --version is specfied.')
+                help='Skip incrementing the version.  Ignored if --version is specfied.')
 p.add_argument('-T', '--no-tag', action='store_false', dest='tag', help='Skip tagging the repository.')
 p.add_argument('-P', '--no-publish', action='store_false', dest='publish', help='Skip publishing to PyPI.')
 
@@ -136,7 +148,7 @@ try:
     with open(verfile, 'rt') as f:
         verlines = f.readlines()
 except Exception as e:
-    fatal("No init file '%s' available -- %s", verfile, str(e))
+    fatal("No init file '%s' available -- %s", verfile, e)
 
 #  Verify the requested bits exist
 if args.changelog:
@@ -172,7 +184,7 @@ if verlines != outlines:
         with open(verfile, 'wt') as f:
             f.write(''.join(outlines))
     except Exception as e:
-        fatal("Init file '%s' update failed -- %s", verfile, str(e))
+        fatal("Init file '%s' update failed -- %s", verfile, e)
 
 if args.changelog:
     version_str = '%s (%s)' % (newver, time.strftime('%Y-%m-%d'))
@@ -184,12 +196,12 @@ if args.increment or args.version is not None:
     cmd = ['git', 'commit', verfile]
     if args.changelog:
         cmd.append(changelogfile)
-    cmd.extend(['-m', 'Release '+newver])
+    cmd.extend(['-m', 'Release ' + newver])
     run(cmd)
     run(['git', 'push'])
 
 if args.tag:
-    run(['git', 'tag', newver, '-m', 'PyPI release '+newver])
+    run(['git', 'tag', newver, '-m', 'PyPI release ' + newver])
     run(['git', 'push', '--tags', 'origin', 'master'])
 
 if args.publish:

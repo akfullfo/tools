@@ -17,9 +17,14 @@
 # ________________________________________________________________________
 #
 
-import os, sys, time, re, json, argparse
+import os
+import sys
+import time
+import json
+import argparse
+
 try:
-        from http.client import HTTPConnection, HTTPSConnection
+    from http.client import HTTPConnection, HTTPSConnection
 except:
     from httplib import HTTPConnection, HTTPSConnection
 try:
@@ -35,25 +40,30 @@ def_initial_secs = 150
 def_retry_secs = 30
 def_passing_grade = "A"
 def_max_attempts = 10
-def_last_assessment = os.path.join(os.environ['HOME'], program+'-last.json')
+def_last_assessment = os.path.join(os.environ['HOME'], program + '-last.json')
 
 def_port = 80
 def_sslport = 443
+
 
 def fatal(fmt, *fargs):
     sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
     sys.exit(2)
 
+
 def warn(fmt, *fargs):
     sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+
 
 def info(fmt, *fargs):
     if not args.quiet:
         sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
 
+
 def verb(fmt, *fargs):
     if args.verbose:
         sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+
 
 class HttpClient(object):
     """
@@ -114,7 +124,7 @@ class HttpClient(object):
         try:
             self.http.connect()
         except Exception as e:
-            fatal("Connection to %s:%d failed -- %s", self.host, self.port, str(e))
+            fatal("Connection to %s:%d failed -- %s", self.host, self.port, e)
         self.lastpath = self.base_path
         if path:
             self.lastpath = self.lastpath.rstrip('/')
@@ -127,13 +137,13 @@ class HttpClient(object):
         ctype = resp.getheader('Content-Type')
         data = resp.read().decode('utf-8')
         verb("Request '%s' status %d, %s length %d, %.2f secs",
-                self.lastpath, resp.status, ctype, len(data), time.time()-start)
+                self.lastpath, resp.status, ctype, len(data), time.time() - start)
         self.http.close()
         if resp.status < 300:
             return (resp.status, data, ctype)
         else:
-            msg =  data.strip()[:200]
-            fatal("HTTP Error %d%s", resp.status, ' -- '+msg if msg else '')
+            msg = data.strip()[:200]
+            fatal("HTTP Error %d%s", resp.status, ' -- ' + msg if msg else '')
 
     def getmap(self, path, query=None):
         """
@@ -148,9 +158,10 @@ class HttpClient(object):
         try:
             result = json.loads(data)
         except Exception as e:
-            fatal("Could not load JSON content from GET '%s' -- %s", self.lastpath, str(e))
+            fatal("Could not load JSON content from GET '%s' -- %s", self.lastpath, e)
         verb("Response for '%s': %s", self.lastpath, json.dumps(result, indent=4))
         return result
+
 
 def canonical_grade(grade):
     if len(grade) < 1:
@@ -167,6 +178,7 @@ def canonical_grade(grade):
         grade_ord -= 1
     return grade_ord
 
+
 def get_age(state):
     end_time = state.get('testTime')
     if end_time:
@@ -175,11 +187,14 @@ def get_age(state):
     else:
         return None
 
+
 def get_duration(state):
     start_time = state.get('startTime')
-    if start_time: start_time /= 1000.0
+    if start_time:
+        start_time /= 1000.0
     end_time = state.get('testTime')
-    if end_time: end_time /= 1000.0
+    if end_time:
+        end_time /= 1000.0
     if start_time and end_time:
         duration = end_time - start_time
         verb("Assesment for '%s' ran for %.1f secs", args.host_under_test, duration)
@@ -191,8 +206,9 @@ def get_duration(state):
         warn("No 'startTime' in response for host '%s'", args.host_under_test)
     return duration
 
+
 p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
-    description="""
+                            description="""
 Initiates a server scan using the SSLlabs.com free SSL scan API.
 
 In normal operation, this checks that the scanning site is operational, initiates
@@ -206,29 +222,29 @@ email if your site has dropped below expectations.
 
 Why the name?  I feel like I'm rereading Catch-22 every time I type "ssllabs".
 http://www.cliffsnotes.com/literature/c/catch22/summary-and-analysis/chapters-1718
-""" %(def_initial_secs/60.0, def_retry_secs))
+""" % (def_initial_secs / 60.0, def_retry_secs))
 
 p.add_argument('-v', '--verbose', action='store_true', dest='verbose', help='Report progress.')
 p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Report only errors.')
 p.add_argument('-W', '--ignore-warnings', action='store_false', dest='report_warnings',
-        help="Don't fail if the SSLlabs 'hasWarnings' flag is set")
+                help="Don't fail if the SSLlabs 'hasWarnings' flag is set")
 p.add_argument('-p', '--publish', action='store_true', dest='publish',
-        help="""Allow SSLlabs.com to publish the assessment grade.
-            This is the polite thing to do but you may want to hold off until your grade is reasonable.""")
+                help="""Allow SSLlabs.com to publish the assessment grade.
+                    This is the polite thing to do but you may want to hold off until your grade is reasonable.""")
 p.add_argument('-l', '--last-assessment', action='store', dest='last_assessment_file', default=def_last_assessment,
-        help="Where to record the last assessment received.  Default is '%s', use '' to disable"%(def_last_assessment,))
+                help="Where to record the last assessment received.  Default is '%s', use '' to disable" % def_last_assessment)
 p.add_argument('-g', '--grade', action='store', dest='passing_grade', default=def_passing_grade,
-        help="""Set the passing grade.  Default is '%s' because it really isn't that hard to do.
-            It is tempting to make the default 'A+' as that isn't hard to do either,
-            but Perfect Forward Secrecy implies requiring https-only access which may
-            be overkill for some sites."""%(def_passing_grade,))
+                help="""Set the passing grade.  Default is '%s' because it really isn't that hard to do.
+                        It is tempting to make the default 'A+' as that isn't hard to do either,
+                        but Perfect Forward Secrecy implies requiring https-only access which may
+                        be overkill for some sites.""" % def_passing_grade)
 p.add_argument('-f', '--force', action='store_true', dest='force', help="Force a new assessment")
 p.add_argument('-P', '--probe-period', action='store', dest='probe_period', type=int,
-        help="Override the default status cycle, in seconds")
+                help="Override the default status cycle, in seconds")
 p.add_argument('-m', '--max-attemtps', action='store', dest='max_attempts', type=int, default=def_max_attempts,
-        help="Change the maximum number of query attempts.  Default is %d, use 0 to try forever"%(def_max_attempts,))
+                help="Change the maximum number of query attempts.  Default is %d, use 0 to try forever" % def_max_attempts)
 p.add_argument('-u', '--base-url', action='store', dest='base_url', default=def_base_url,
-        help="Set the base url of the test site.  Default is '%s'"%(def_base_url,))
+                help="Set the base url of the test site.  Default is '%s'" % def_base_url)
 p.add_argument('host_under_test', help='The site (FQDN only) to be tested')
 
 args = p.parse_args()
@@ -250,9 +266,9 @@ current = ssllabs_status.get(u'currentAssessments')
 capacity = ssllabs_status.get(u'maxAssessments')
 version = ssllabs_status.get(u'engineVersion')
 if current > 1:
-    info("%s version %s, current assessments %s of %s", args.base_url, version, str(current), str(capacity))
+    info("%s version %s, current assessments %s of %s", args.base_url, version, current, capacity)
 else:
-    verb("%s version %s, current assessments %s of %s", args.base_url, version, str(current), str(capacity))
+    verb("%s version %s, current assessments %s of %s", args.base_url, version, current, capacity)
 
 if current is None or capacity is None:
     warn("Response did not include capacity info, pressing on regardless")
@@ -262,7 +278,7 @@ else:
 if load > 60:
     fatal("Excessive load on %s, won't schedule an assessment of '%s'", args.base_url, args.host_under_test)
 
-query = { 'host': args.host_under_test, 'all': 'done' }
+query = {'host': args.host_under_test, 'all': 'done'}
 if args.publish:
     query['publish'] = 'on'
 initial_query = query.copy()
@@ -292,7 +308,7 @@ if args.last_assessment_file:
         with open(args.last_assessment_file, 'w') as f:
             f.write(json.dumps(state, indent=4))
     except Exception as e:
-        warn("Could not save last assessment -- %s", str(e))
+        warn("Could not save last assessment -- %s", e)
 if status != 'READY':
     fatal("It failed")
 
@@ -309,11 +325,11 @@ for ep in state['endpoints']:
     this_grade = ep.get('grade')
     this_warn = ep.get('hasWarnings')
     if this_warn is None:
-        warn("Missing 'hasWarnings' in assessment endpoint %d", ep_pos-1)
+        warn("Missing 'hasWarnings' in assessment endpoint %d", ep_pos - 1)
     elif this_warn:
         has_warnings = True
     if this_grade is None:
-        warn("Missing grade in assessment endpoint %d", ep_pos-1)
+        warn("Missing grade in assessment endpoint %d", ep_pos - 1)
         continue
     grade_num = canonical_grade(this_grade)
     if grade_num <= min_grade:
@@ -327,7 +343,7 @@ test_age_mins = get_age(state) / 60.0
 if test_age_mins < 2:
     test_age_mins = None
 verb("Total execution time: %.1f secs%s",
-        time.time() - program_start, '' if test_age_mins is None else ", original test ran %.0f mins ago"%(test_age_mins))
+        time.time() - program_start, '' if test_age_mins is None else ", original test ran %.0f mins ago" % test_age_mins)
 if args.report_warnings and has_warnings:
     report_func = warn
     exit_code = 1
@@ -337,6 +353,6 @@ else:
 report_func("Host '%s' received grade '%s'%s%s%s",
                 args.host_under_test, grade,
                 ' with WARNINGS' if has_warnings else '',
-                '' if duration is None else ', test ran for %.1f secs' % (duration,),
-                '' if test_age_mins is None else ", %.0f mins ago"%(test_age_mins))
+                '' if duration is None else ', test ran for %.1f secs' % duration,
+                '' if test_age_mins is None else ", %.0f mins ago" % test_age_mins)
 sys.exit(exit_code)

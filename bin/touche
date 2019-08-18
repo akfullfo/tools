@@ -17,22 +17,29 @@
 # ________________________________________________________________________
 #
 
-import os, sys, time, subprocess, argparse
+import os
+import sys
+import time
+import subprocess
+import argparse
 from taskforce import watch_files, poll
 
 polling_mode_delay = 3
 
 program = os.path.basename(os.path.splitext(sys.argv[0])[0])
 
+
 def fatal(fmt, *fargs):
     sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
     sys.exit(2)
 
+
 def warn(fmt, *fargs):
     sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
 
+
 p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
-    description="""
+                            description="""
 
 Efficiently wait for file changes (touches), either exiting or optionally
 running a command.
@@ -40,7 +47,7 @@ running a command.
 Commands are always run via a shell.  The environment variable "TOUCHE_PATHS"
 will be set to the list of files that changed.
 """,
-    epilog="""
+                            epilog="""
 These examples do basically the same thing ...
 
     1.  while {program} -x /var/log/authlog; do
@@ -55,12 +62,12 @@ These examples do basically the same thing ...
 p.add_argument('-q', '--quiet', action='store_true', help="Don't report the path(s) that changed to stdout")
 p.add_argument('-c', '--command', action='store', help="Run the command when any path changes")
 p.add_argument('-x', '--exit', action='store_true',
-        help="Exit after any change.  If --command is specified, the command will be run before exiting")
+                help="Exit after any change.  If --command is specified, the command will be run before exiting")
 p.add_argument('-s', '--shell', action='store', help="Shell to use when running command")
 p.add_argument('-i', '--ignore', action='store_true',
-        help="Ignore the exit code of the command.  Normally %s exits if the command fails" % repr(program))
+                help="Ignore the exit code of the command.  Normally %r exits if the command fails" % program)
 p.add_argument('-d', '--dampen', nargs='?', action='store', metavar='secs', type=float, const=1.0, default=0.0,
-        help="Dampen the response for cases where double updates are done, as with 'vim'")
+                help="Dampen the response for cases where double updates are done, as with 'vim'")
 p.add_argument('paths', nargs='+', metavar='path', help="Watch these for changes")
 
 args = p.parse_args()
@@ -84,7 +91,7 @@ try:
     while True:
         code = 0
         paths = []
-        evlist = pset.poll(polling_mode_delay*1000.0)
+        evlist = pset.poll(polling_mode_delay * 1000.0)
         if len(evlist) > 0:
             for wo, mask in evlist:
                 for path in wo.get():
@@ -106,16 +113,16 @@ try:
                 subprocess.check_call(args.command, shell=args.shell, env=export_env)
             except subprocess.CalledProcessError as e:
                 if e.output:
-                    warn("%s", str(e.output))
+                    warn("%s", e.output)
                 else:
-                    warn("Command exited %s", repr(e.returncode))
+                    warn("Command exited %r", e.returncode)
                 code = e.returncode
                 if code == 0:
                     code = 126
                 if not args.ignore:
                     break
             except Exception as e:
-                warn("Command execution failed -- %s", str(e))
+                warn("Command execution failed -- %s", e)
                 code = 127
                 if not args.ignore:
                     break
@@ -124,5 +131,5 @@ try:
 except KeyboardInterrupt:
     exit(0)
 except Exception as e:
-    fatal("Unexpected exception -- %s", str(e))
+    fatal("Unexpected exception -- %s", e)
 exit(code)

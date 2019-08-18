@@ -17,17 +17,23 @@
 # ________________________________________________________________________
 #
 
-import sys, re, os, argparse
+import sys
+import re
+import os
+import argparse
 
 program = os.path.basename(os.path.splitext(sys.argv[0])[0])
+
 
 def fatal(fmt, *fargs):
     sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
     sys.exit(2)
 
+
 def verb(fmt, *fargs):
     if not args.quiet:
         sys.stderr.write(program + ': ' + (fmt.rstrip() % fargs) + "\n")
+
 
 def update(doc, tag_start, tag_end, content):
     ret = []
@@ -46,6 +52,7 @@ def update(doc, tag_start, tag_end, content):
     if not found:
         ret.extend(content)
     return ret
+
 
 def process(doc, anchors, config_file):
     config_base = os.path.basename(config_file)
@@ -78,11 +85,11 @@ def process(doc, anchors, config_file):
                 brace_list[tag] = tag
         for tag, val in sq_list.items():
             if args.double_quotes:
-                line = re.sub("'"+val+"'", '''"<a href="#%s">%s</a>"''' % (tag, val), line)
+                line = re.sub("'" + val + "'", '''"<a href="#%s">%s</a>"''' % (tag, val), line)
             else:
-                line = re.sub("'"+val+"'", """'<a href="#%s">%s</a>'""" % (tag, val), line)
+                line = re.sub("'" + val + "'", """'<a href="#%s">%s</a>'""" % (tag, val), line)
         for tag, val in brace_list.items():
-            line = re.sub("{"+val+"}", """{<a href="#%s">%s</a>}""" % (tag, val), line)
+            line = re.sub("{" + val + "}", """{<a href="#%s">%s</a>}""" % (tag, val), line)
         linked_conf.append(line)
     linked_conf.extend([
         '</pre>\n',
@@ -94,8 +101,9 @@ def process(doc, anchors, config_file):
         doc = update(doc, tag_start, tag_end, linked_conf)
     return doc
 
+
 p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
-    description="""
+                            description="""
 Extracts known anchors from an html or markdown document then looks for those
 anchors in a "taskforce" configuration file.  The configuration is converted
 to create links into the document.  The configuration is then injected into
@@ -121,9 +129,9 @@ edited to move the configuration to the correct place.
 
 p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Report only errors.')
 p.add_argument('-p', '--preserve-single-quotes', action='store_false', dest='double_quotes',
-        help="Don't convert the single quotes used to tag keywords into double quotes")
+                help="Don't convert the single quotes used to tag keywords into double quotes")
 p.add_argument('-n', '--dry-run', action='store_true', dest='dry_run',
-        help='Instead of updating the document, just write the converted configuration to stdout')
+                help='Instead of updating the document, just write the converted configuration to stdout')
 p.add_argument('document', help='The html or markdown document to be processed')
 p.add_argument('config', nargs='+', help='The config files to be processed.  The document will be updated with each in turn')
 

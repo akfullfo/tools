@@ -24,7 +24,10 @@ change in status to stderr.  Changes are also logged to syslog.
 It is intended to be run via cron -- status changes are sent by email.
 """
 
-import sys, os, subprocess, json
+import sys
+import os
+import subprocess
+import json
 import logging
 import logging.handlers
 
@@ -32,10 +35,12 @@ name = 'megadeath'
 
 state_file = '/var/local/' + name + '/state.json'
 
+
 def report(fmt, *fargs):
     msg = fmt.rstrip() % fargs
     log.warning("%s", msg)
     print msg
+
 
 def read_item(state, section, line):
     if line.find(':') < 0:
@@ -46,6 +51,7 @@ def read_item(state, section, line):
         return
     state[section][tag] = val.strip()
 
+
 def read_count(state, section, line):
     if line.find(':') < 0:
         return
@@ -55,29 +61,30 @@ def read_count(state, section, line):
         return
     state[section][tag] = int(val.strip())
 
+
 try:
     log_fmt = '%(name)s[%(process)d]: %(levelname)s - %(message).1000s'
     log = logging.getLogger(name)
     loghandler = logging.handlers.SysLogHandler("/dev/log")
-    #loghandler = logging.StreamHandler()
+    # loghandler = logging.StreamHandler()
     loghandler.setFormatter(logging.Formatter(log_fmt))
     log.addHandler(loghandler)
     log.setLevel(logging.INFO)
 except Exception as e:
-    report("Failed to set up logging -- %s", str(e))
+    report("Failed to set up logging -- %s", e)
     sys.exit(2)
 
 log.debug("Starting")
 
 try:
     p = subprocess.Popen(['MegaCli64', '-AdpAllInfo', '-aALL'],
-                executable='/opt/MegaRAID/MegaCli/MegaCli64',
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE)
+                            executable='/opt/MegaRAID/MegaCli/MegaCli64',
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
     (out, err) = p.communicate()
     code = p.wait()
 except Exception as e:
-    report("MegaCli64 failed -- %s", str(e))
+    report("MegaCli64 failed -- %s", e)
     sys.exit(2)
 
 if code != 0:
@@ -110,7 +117,7 @@ if os.path.exists(state_file):
         if state_text.strip():
             prev_state = json.loads(state_text)
     except Exception as e:
-        report("No previous state file -- %s", str(e), exc_info=True)
+        report("No previous state file -- %s", e, exc_info=True)
 
 product = curr_state['info'].get('Product Name')
 if product is None:
@@ -129,12 +136,11 @@ for s in list(set(curr_state.keys() + prev_state.keys())):
         if not prev and not curr:
             continue
         if prev != curr:
-            report("  %s: was %s, is now %s",
-                        tag, str(prev), str(curr))
+            report("  %s: was %s, is now %s", tag, prev, curr)
 try:
     with open(state_file, 'w') as f:
         json.dump(curr_state, f, indent=4)
 except Exception as e:
-    report("Could not save state file -- %s", str(e))
+    report("Could not save state file -- %s", e)
     sys.exit(2)
 sys.exit(0)

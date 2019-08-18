@@ -16,38 +16,45 @@
 #  limitations under the License.
 # ________________________________________________________________________
 #
- 
-import os, sys, time, urlparse, json, argparse, logging
+
+import os
+import sys
+import urlparse
+import json
+import argparse
+import logging
 from logging.handlers import SysLogHandler
 import BaseHTTPServer
- 
+from taskforce.utils import pidclaim
+
 def_listen = '0.0.0.0:8003'
 
 program = os.path.basename(os.path.splitext(sys.argv[0])[0])
 logging_name = program
 def_pidfile = '/var/run/' + program + '.pid'
 
+
 def daemonize(**params):
     """
-This is a simple daemonization method.  It just does a double fork() and the
-parent exits after closing a good clump of possibly open file descriptors.  The
-child redirects stdin from /dev/null and sets a new process group and session.
-If you need fancier, suggest you look at http://pypi.python.org/pypi/python-daemon/
+        This is a simple daemonization method.  It just does a double fork() and the
+        parent exits after closing a good clump of possibly open file descriptors.  The
+        child redirects stdin from /dev/null and sets a new process group and session.
+        If you need fancier, suggest you look at http://pypi.python.org/pypi/python-daemon/
 
-Application logging setup needs to be delayed until after daemonize() is called.
+        Application logging setup needs to be delayed until after daemonize() is called.
 
-Supported params:
+        Supported params:
 
-    redir   - Redirect stdin, stdout, and stderr to /dev/null.  Default
-          is True, use "redir=False" to leave std files unchanged.
+            redir   - Redirect stdin, stdout, and stderr to /dev/null.  Default
+                  is True, use "redir=False" to leave std files unchanged.
 
-    log     - logging function, default is no logging.  A logging function
-          works best if you use stderr or a higher fd because these are
-          closed last.  But note that all fds are closed or associated
-          with /dev/null, so the log param is really only useful for
-          debugging this function itself.  A caller needing logging
-          should probably use syslog.
-"""
+            log     - logging function, default is no logging.  A logging function
+                  works best if you use stderr or a higher fd because these are
+                  closed last.  But note that all fds are closed or associated
+                  with /dev/null, so the log param is really only useful for
+                  debugging this function itself.  A caller needing logging
+                  should probably use syslog.
+    """
     log = params.get('log')
     redir = params.get('redir', True)
 
@@ -55,66 +62,87 @@ Supported params:
         if os.fork() != 0:
             os._exit(0)
     except Exception as e:
-        if log: log("First fork failed -- %s", str(e))
+        if log:
+            log("First fork failed -- %s", e)
         return False
     try:
         os.setsid()
     except Exception as e:
-        if log: log("Setsid() failed -- %s", str(e))
+        if log:
+            log("Setsid() failed -- %s", e)
 
     try:
         if os.fork() != 0:
             os._exit(0)
     except Exception as e:
-        if log: log("Second fork failed, pressing on -- %s", str(e))
+        if log:
+            log("Second fork failed, pressing on -- %s", e)
 
     try:
         os.chdir('/')
     except Exception as e:
-        if log: log("Chdir('/') failed -- %s", str(e))
+        if log:
+            log("Chdir('/') failed -- %s", e)
     if redir:
-        try: os.close(0)
+        try:
+            os.close(0)
         except Exception as e:
-            if log: log("Stdin close failed -- %s", str(e))
+            if log:
+                log("Stdin close failed -- %s", e)
         try:
             fd = os.open('/dev/null', os.O_RDONLY)
         except Exception as e:
-            if log: log("Stdin open failed -- %s", str(e))
+            if log:
+                log("Stdin open failed -- %s", e)
         if fd != 0:
-            if log: log("Stdin open returned %d, should be 0", fd)
-        try: os.close(1)
+            if log:
+                log("Stdin open returned %d, should be 0", fd)
+        try:
+            os.close(1)
         except Exception as e:
-            if log: log("Stdout close failed -- %s", str(e))
+            if log:
+                log("Stdout close failed -- %s", e)
         try:
             fd = os.open('/dev/null', os.O_WRONLY)
         except Exception as e:
-            if log: log("Stdout open failed -- %s", str(e))
+            if log:
+                log("Stdout open failed -- %s", e)
         if fd != 1:
-            if log: log("Stdout open returned %d, should be 1", fd)
+            if log:
+                log("Stdout open returned %d, should be 1", fd)
 
     try:
         os.setpgrp()
     except Exception as e:
-        if log: log("Setpgrp failed -- %s", str(e))
+        if log:
+            log("Setpgrp failed -- %s", e)
 
     if redir:
-        try: os.close(2)
+        try:
+            os.close(2)
         except Exception as e:
-            if log: log("Stderr close failed -- %s", str(e))
+            if log:
+                log("Stderr close failed -- %s", e)
         try:
             fd = os.dup(1)
         except Exception as e:
-            if log: log("Stderr dup failed -- %s", str(e))
+            if log:
+                log("Stderr dup failed -- %s", e)
         if fd != 2:
-            if log: log("Stderr dup returned %d, should be 2", fd)
-    for fd in range(3,50):
-        try: os.close(fd)
-        except: pass
- 
+            if log:
+                log("Stderr dup returned %d, should be 2", fd)
+    for fd in range(3, 50):
+        try:
+            os.close(fd)
+        except:
+            pass
+
+
 def handle_hook(payload):
     global log
-    log.info("Hooked payload: %s", str(payload))
- 
+    log.info("Hooked payload: %s", payload)
+
+
 class Hook(BaseHTTPServer.BaseHTTPRequestHandler):
     server_version = "captain_hook/1.0"
     sys_version = ''
@@ -134,7 +162,7 @@ class Hook(BaseHTTPServer.BaseHTTPRequestHandler):
         try:
             msg = fmt.strip() % fargs
         except Exception as e:
-            msg = "Error formatting '%s' -- %s" % (str(fmt), str(e))
+            msg = "Error formatting '%s' -- %s" % (fmt, e)
         try:
             saddr = self.format_addr(self.server.server_address, showport=True)
         except:
@@ -159,8 +187,11 @@ class Hook(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def do_POST(self):
         # Check that the IP is within the GH ranges
-        if not any(self.client_address[0].startswith(IP)
-               for IP in ('192.30.252', '192.30.253', '192.30.254', '192.30.255')):
+        if not any(self.client_address[0].startswith(ip) for ip in (
+                                            '192.30.252',
+                                            '192.30.253',
+                                            '192.30.254',
+                                            '192.30.255')):
             self.send_error(403)
 
         length = int(self.headers['Content-Length'])
@@ -171,9 +202,8 @@ class Hook(BaseHTTPServer.BaseHTTPRequestHandler):
 
         self.send_resp('OK')
 
-p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
-    description="""
-""")
+
+p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter, description="Github webhook handler")
 
 p.add_argument('-V', '--version', action='store_true', dest='version', help='Report version of package and exit.')
 p.add_argument('-v', '--verbose', action='store_true', dest='verbose', help='Verbose logging for debugging.')
@@ -181,9 +211,9 @@ p.add_argument('-q', '--quiet', action='store_true', dest='quiet', help='Quiet l
 p.add_argument('-e', '--log-stderr', action='store_true', dest='log_stderr', help='Log to stderr instead of syslog.')
 p.add_argument('-b', '--background', action='store_true', dest='daemonize', help='Run in the background.')
 p.add_argument('-p', '--pidfile', action='store', dest='pidfile', metavar='FILE',
-            help='Pidfile path, default "%s", "-" means none.' %(def_pidfile,))
+                help='Pidfile path, default "%s", "-" means none.' % def_pidfile)
 p.add_argument('-l', '--listen', dest='listen', metavar='[address:]port', default=def_listen,
-            help='Listent address, default: ' + def_listen)
+                help='Listent address, default: %s' % def_listen)
 
 args = p.parse_args()
 
@@ -245,9 +275,9 @@ log.info("%s listening on %s:%d", Hook.server_version, address, port)
 
 if pidfile is not None:
     try:
-        utils.pidclaim(pidfile)
+        pidclaim(pidfile)
     except Exception as e:
-        log.critical('Fatal error -- %s', str(e), exc_info=args.verbose)
+        log.critical('Fatal error -- %s', e, exc_info=args.verbose)
         sys.exit(2)
 
 server_class = BaseHTTPServer.HTTPServer
@@ -258,13 +288,13 @@ try:
 except KeyboardInterrupt:
     log.info("Exiting on interrupt")
 except Exception as e:
-    log.error("Exiting on exception -- %s", str(e), exc_info=True)
+    log.error("Exiting on exception -- %s", e, exc_info=True)
     code = 2
 
 try:
     httpd.server_close()
 except Exception as e:
-    log.warning("Exception while attempting to close server -- %s", str(e))
+    log.warning("Exception while attempting to close server -- %s", e)
     if not code:
         code = 1
 
