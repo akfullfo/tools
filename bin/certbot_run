@@ -1,0 +1,204 @@
+#!/usr/bin/env python
+# ________________________________________________________________________
+#
+#  Copyright (C) 2019 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+
+import os
+import sys
+import subprocess
+import argparse
+
+WEBHOST_ACCESS = "root@www"
+WEBBASE_PATH = "/var/www"
+CERTBOT_BASE = '.well-known/acme-challenge'
+
+_webbase = WEBHOST_ACCESS + ':' + WEBBASE_PATH
+_domain_map = {}
+
+#  Map certificate domains to the appropriate web server document root.
+#
+KNOWN_CERT_DOMAINS = {
+    'mmm.fullford.com': (_webbase, 'mmm/htdocs', 'fullford.com'),
+    'taskforce.fullford.com': (_webbase, 'taskforce'),
+    'www.artmusicconcerts.com': (_webbase, 'artmusic', 'artmusicconcerts.com'),
+    'mail.fullford.com': (_webbase, 'mail'),
+}
+
+VALIDATION_REQ = ('CERTBOT_DOMAIN', 'CERTBOT_VALIDATION', 'CERTBOT_TOKEN')
+
+PROGRAM = os.path.basename(os.path.splitext(sys.argv[0])[0])
+HOOK = os.path.join('/usr/local/bin', PROGRAM)
+
+args = None
+
+
+class RawDescriptionWithDefaults(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+    pass
+
+
+def parse_args():
+    p = argparse.ArgumentParser(formatter_class=RawDescriptionWithDefaults)
+    p.add_argument('-v', '--verbose', action='store_true', help="Report progress")
+    p.add_argument('--force-renewal', action='store_true', help="Send --force-renewal flag to certbot")
+    p.add_argument('-n', '--dry-run', action='store_true', help="Send --dry-run flag to certbot")
+    p.add_argument('-P', '--purge', action='store_true', help="Run the cleanup hook on each domain and exit")
+    p.add_argument('-V', '--validate', action='store_true', help="Validate local access but don't run certbot")
+    phooks = p.add_mutually_exclusive_group(required=False)
+    phooks.add_argument('--auth', action='store_true', help="Act as a certbot manual-auth-hook")
+    phooks.add_argument('--clean', action='store_true', help="Act as a certbot manual-cleanup-hook")
+    phooks.add_argument('--deploy', action='store_true', help="Act as a certbot --deploy-hook")
+    return p.parse_args()
+
+
+def fatal(fmt, *fargs):
+    sys.stderr.write(PROGRAM + ': ' + (fmt.rstrip() % fargs) + "\n")
+    exit(2)
+
+
+def verb(fmt, *fargs):
+    if args.verbose:
+        sys.stdout.write(PROGRAM + ': ' + (fmt.rstrip() % fargs) + "\n")
+
+
+def run(server, cmd):
+    verb("On %r, running %r", server, cmd)
+    try:
+        subprocess.check_output(['ssh', '-n', server, cmd], stderr=subprocess.STDOUT)
+    except subprocess.CalledProcessError as e:
+        fatal("Web server %s access failed -- %s", server, e.output if e.output else e)
+    except Exception as e:
+        fatal("Could not access web server at %s -- %s", server, e)
+
+
+def check_hook(args):
+    missing = []
+    if args.validate:
+        fatal("The --validate flag is not allowed with hook operations")
+    for tag in VALIDATION_REQ:
+        if os.environ.get(tag):
+            name = tag.replace('CERTBOT_', '').lower()
+            setattr(args, name, os.environ.get(tag))
+        else:
+            missing.append(tag)
+    if missing:
+        fatal("Invalid certbot env when running as certbot hook.  Needed vars: %s", ', '.join(missing))
+
+
+def get_certbot_info(domain, check=True):
+    if check:
+        basedom = _domain_map.get(domain)
+        if not basedom:
+            fatal("Domain %r is unknown", domain)
+    else:
+        basedom = domain
+    webbase, docroot = KNOWN_CERT_DOMAINS[basedom][0:2]
+    domains = [basedom]
+    if len(KNOWN_CERT_DOMAINS[basedom]) > 2:
+        domains += KNOWN_CERT_DOMAINS[basedom][2:]
+    server, base = webbase.split(':', 1)
+    return server, os.path.join(base, docroot, CERTBOT_BASE), domains
+
+
+def clean_hook(args, domain=None):
+    if not domain:
+        check_hook(args)
+        domain = args.domain
+    server, path, domains = get_certbot_info(domain)
+    run(server, "rm -rf %s/*" % path)
+    verb("Cleaned %s:%s", server, path)
+
+
+def auth_hook(args):
+    check_hook(args)
+    server, path, domains = get_certbot_info(args.domain)
+    run(server, "(test -d '{path}' || mkdir -p '{path}') && echo '{val}' > '{path}/{token}'".
+                    format(path=path, val=args.validation, token=args.token))
+    verb("Advertised %s auth", args.domain)
+
+
+def clean_deploy(args):
+    check_hook(args)
+    verb("Would deploy %s", args.domain)
+
+
+def process(args):
+    webbases = set()
+    verb("Will process these domains ...")
+    for domain in sorted(KNOWN_CERT_DOMAINS):
+        webbases.add(KNOWN_CERT_DOMAINS[domain][0])
+        server, path, domains = get_certbot_info(domain)
+        verb("    %s: %s", ', '.join(domains), os.path.join(*KNOWN_CERT_DOMAINS[domain][0:2]))
+    for webbase in sorted(webbases):
+        server, base = webbase.split(':', 1)
+        try:
+            subprocess.check_output(['ssh', '-n', server, "test -d '%s'" % base], stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            if e.returncode == 1:
+                fatal("Web server %s access failed -- %s", webbase, base + ' is not a directory')
+            else:
+                fatal("Web server %s access failed -- %s", webbase, e.output if e.output else e)
+        except Exception as e:
+            fatal("Could not access web server at %s -- %s", webbase, e)
+        verb("Access to web base %s:%s confirmed", server, base)
+    if args.validate:
+        return
+
+    for domain in sorted(KNOWN_CERT_DOMAINS):
+        server, path, domains = get_certbot_info(domain)
+        hook_verb = ' -v' if args.verbose else ''
+        cmd = ['certbot',
+                '--noninteractive',
+                '--manual',
+                '--manual-public-ip-logging-ok',
+                '--manual-auth-hook', HOOK + hook_verb + ' --auth',
+                '--manual-cleanup-hook', HOOK + hook_verb + ' --clean',
+                '--preferred-challenges=http',
+                '-d', ','.join(domains)]
+        if not args.verbose:
+            cmd += ['--quiet']
+        if args.force_renewal:
+            cmd += ['--force-renewal']
+        if args.dry_run:
+            cmd += ['--dry-run']
+        cmd += ['certonly']
+        verb("Bot: %s", ' '.join(cmd))
+        subprocess.check_call(cmd)
+
+
+args = parse_args()
+
+for domain in sorted(KNOWN_CERT_DOMAINS):
+    server, path, domains = get_certbot_info(domain, check=False)
+    for dom in domains:
+        if dom in _domain_map:
+            if _domain_map[dom] != domain:
+                fatal("Domain mapping inconsistent, expected %r, got %r", domain, dom)
+        else:
+            _domain_map[dom] = domain
+
+if args.purge:
+    for domain in sorted(KNOWN_CERT_DOMAINS):
+        clean_hook(args, domain=domain)
+elif args.auth:
+    auth_hook(args)
+elif args.clean:
+    clean_hook(args)
+elif args.deploy:
+    clean_deploy(args)
+else:
+    process(args)
+exit(0)
