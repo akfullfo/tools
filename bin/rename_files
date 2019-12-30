@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+# ________________________________________________________________________
+#
+#  Copyright (C) 2019 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+
+import os
+import sys
+import argparse
+
+program = os.path.basename(os.path.splitext(sys.argv[0])[0])
+
+p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
+                            description="""
+Rename all files in a directory tree from on extension to another.
+
+For example:
+
+    %s -f m4a -t mp3 ~/Music/iTunes
+
+""" % program)
+
+p.add_argument('-v', '--verbose', action='store_true', help="List each resulting path")
+p.add_argument('-n', '--dryrun', action='store_true', help="List each resulting path but don't perform the operation")
+p.add_argument('-f', '--from-ext', action='store', required=True, help='"From" extension (without the dot)')
+p.add_argument('-t', '--to-ext', action='store', required=True, help='"To" extension (without the dot)')
+p.add_argument('path', nargs='+', action='store', help='Path or paths to descend')
+
+args = p.parse_args()
+
+errors = 0
+
+
+def error(e):
+    global errors
+    errors += 1
+    sys.stderr.write("%s\n" % e)
+
+
+from_ext = '.' + args.from_ext
+from_len = len(from_ext)
+to_ext = '.' + args.to_ext
+
+for path in args.path:
+    for dirpath, dirnames, filenames in os.walk(path, onerror=error, followlinks=True):
+        for fname in filenames:
+            if fname.endswith(from_ext):
+                tname = fname[:-from_len] + to_ext
+                tpath = os.path.join(dirpath, tname)
+                if args.verbose or args.dryrun:
+                    print(tpath)
+                if not args.dryrun:
+                    try:
+                        os.rename(os.path.join(dirpath, fname), tpath)
+                    except Exception as e:
+                        error(e)
+
+exit(errors)
