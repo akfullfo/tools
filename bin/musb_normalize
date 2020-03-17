@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+# ________________________________________________________________________
+#
+#  Copyright (C) 2020 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+
+import os
+import sys
+import time
+import json
+import argparse
+import subprocess
+# import traceback
+# import inspect
+import logging
+from multiprocessing import cpu_count
+import multiprocessing
+
+DEF_THRESHOLD = -0.1
+DEF_LIMIT = 3
+DEF_FROM_EXT = 'm4a'
+DEF_STYLE = 'loudnorm'
+
+#  Supported styles.  The value indicates whether the Task
+#  object should be instantiated per audio file, or per
+#  directory containing audio files (ie ablums).
+#
+SUPPORTED_STYLES = {
+        DEF_STYLE: False,
+        'track': False,
+        'album': True,
+    }
+
+TRACE = False
+TRACE = True
+
+errors = 0
+
+logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s')
+log = logging.getLogger()
+
+
+def arg_parse():
+    program = os.path.basename(os.path.splitext(sys.argv[0])[0])
+
+    def positive_int(val):
+        try:
+            a = int(val)
+            if a > 0:
+                return a
+        except:
+            pass
+        raise argparse.ArgumentTypeError("Value %r is not a positive integer" % val)
+
+    def decibel(val):
+        try:
+            a = float(val)
+            if a <= 0.0:
+                return a
+        except:
+            pass
+        raise argparse.ArgumentTypeError("Value %r is not a negative number" % val)
+
+    p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
+                                description="""
+Run ffmpeg to normalize audio file volume.
+
+This article proposes 'album' as the least intrusive adjustment, describing loudnorm as
+evil and immoral:
+
+    https://whoislewys.com/2018/10/18/audio_norm_guides_are_evil_and_immoral/
+
+However, track normalization either by directly altering dB or by applying the ffmpeg
+'loudnorm' filter is useful in at least one specific case, which is when the audio is to
+be played in a noisy environment, specially in a car.
+
+So the program provides three styles of normalization:
+
+    loudnorm
+    track
+    album
+
+'loudnorm' uses the two-pass approach described here:
+
+    http://peterforgacs.github.io/2018/05/20/Audio-normalization-with-ffmpeg/
+
+to adjust the audio according to the ebu R128 standard.
+
+'track' uses multiple passes to adjust dB towards 0.0 on a track-by-track basis.
+
+'album' uses a two-pass approach.  One finds the loudest track in a directory
+of tracks, and then adjusts all tracks by the same amount to move the loudest
+track to 0.0 dB.
+
+For example:
+
+    %s -S album -f m4a ~/Music/iTunes
+
+    """ % program)
+
+    p.add_argument('-v', '--verbose', action='store_true', help="List each resulting path")
+    p.add_argument('-n', '--dryrun', action='store_true', help="List each resulting path but don't perform the operation")
+    p.add_argument('-S', '--style', action='store', default='loudnorm', choices=sorted(SUPPORTED_STYLES),
+                    help="Conversion style, default %r" % DEF_STYLE)
+    p.add_argument('-f', '--from-ext', action='store', metavar='ext', default=DEF_FROM_EXT,
+                    help='"From" extension (without the dot), default %s' % DEF_FROM_EXT)
+    p.add_argument('-t', '--threshold', action='store', metavar='-dB', type=decibel, default=DEF_THRESHOLD,
+                    help='dB threshold below which volume is adjusted, default %.2f' % DEF_THRESHOLD)
+    p.add_argument('-l', '--limit', action='store', metavar='num', default=DEF_LIMIT, type=positive_int,
+                    help='Limit on passes to adjust volume, default %r' % DEF_LIMIT)
+    p.add_argument('-s', '--simultaneous-tasks', action='store', metavar='num', type=positive_int,
+                    help='Number of simultaneous tasks to run.  '
+                         'Default is the number of CPU threads which is %r on this system' % cpu_count())
+    p.add_argument('path', nargs='+', action='store', help='Path or paths to descend')
+
+    return p.parse_args()
+
+
+def error(fmt, *fargs, **kargs):
+    global errors
+    errors += 1
+    name = kargs.pop('name', None)
+    exc = kargs.pop('exc', None)
+
+    try:
+        msg = fmt % fargs
+    except Exception as e:
+        msg = "Format of %r %% %r failed -- %s" % (fmt, fargs, e)
+
+    if name:
+        log.error("%s: %s", name, msg, exc_info=True)
+    else:
+        log.error("%s", msg, exc_info=True)
+    if hasattr(exc, 'output'):
+        log.error("Output ...")
+        log.error(exc.output)
+    exit(99)
+
+
+class Task(object):
+
+    def __init__(self, path, args):
+        self.name = None
+        self.path = path
+        parts = path.split(os.path.sep)
+        if len(parts) > 2:
+            self.name = parts[0] + '/.../' + parts[-1]
+        else:
+            self.name = path
+        self.args = args
+        self.start = None
+        self.count = 0
+        self.from_ext = '.' + args.from_ext
+        self.from_len = len(self.from_ext)
+
+        if not hasattr(self, args.style):
+            raise Exception("Attempt to process with unsupported style %r" % args.style)
+        self.process = getattr(self, args.style)
+
+        #  Check for accessibility early
+        #
+        with open(self.path, 'rb'):
+            pass
+
+    def error(self, fmt, *fargs, **kwargs):
+        kwargs['name'] = self.name
+        error(fmt, *fargs, **kwargs)
+
+    def run(self, cmd):
+        return subprocess.check_output(cmd, universal_newlines=True, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+
+    def get_db(self):
+        out = self.run(['ffmpeg', '-i', self.path, '-af', 'volumedetect', '-vn', '-sn', '-dn', '-f', 'null', '/dev/null'])
+
+        max_db = None
+        for line in out.splitlines():
+            if 'max_volume:' in line:
+                line = line.rstrip()
+                max_db, db_name = line.split()[-2:]
+                if db_name != 'dB':
+                    self.error("Bad max volume line: %s", line)
+                else:
+                    max_db = float(max_db)
+                break
+        if max_db is None:
+            self.error("No max_volume found")
+            max_db = 0.0
+        elif max_db > 0.01:
+            self.error("Detected positive dB %.1f", max_db)
+            max_db = 0.0
+        return max_db
+
+    def track(self):
+        if self.args.dryrun:
+            return {"adjustments": None, "duration": None}
+        tmp = None
+        runs = 0
+        start = time.time()
+        try:
+            max_db = self.get_db()
+            for attempt in range(self.args.limit):
+                if max_db < self.args.threshold:
+                    tmp = self.path[:-self.from_len] + '.tmp' + self.from_ext
+                    self.run(['ffmpeg', '-i', self.path, '-af', 'volume=%.1fdB' % -max_db, '-c:v', 'copy', tmp])
+                    runs += 1
+                    os.rename(tmp, self.path)
+                    prev_db = max_db
+                    max_db = self.get_db()
+                if max_db >= self.args.threshold:
+                    break
+                if abs(max_db - prev_db) < 0.01:
+                    log.info("%s: No significant change in dB %.2f after %r adjustments", self.name, max_db, runs)
+                    break
+            if max_db < self.args.threshold and runs == self.args.limit:
+                log.warning("%s: Max dB %.2f still below threshold %.2f after %r attempt%s",
+                            self.name, max_db, self.args.threshold, runs, '' if runs == 1 else 's')
+            delta = time.time() - start
+            log.info("%s: %.1f dB vol change %.1f secs (adj %d)", self.name, -max_db, delta, runs)
+            return {"adjustments": runs, "duration": delta}
+        except Exception as e:
+            error("%s", e, exc=e)
+            return {"adjustments": None, "duration": None, "error": str(e)}
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
+                log.warning("Removed %s", tmp)
+
+    def loudnorm(self):
+        std_loudnorm = 'loudnorm=I=-23:LRA=7:tp=-2:print_format=json'
+        out = self.run(['ffmpeg', '-i', self.path, '-af', std_loudnorm, '-f', 'null', '/dev/null'])
+
+        #  This is ugly.  We need to parse the verbose output until we get to the
+        #  lump of JSON we want at the end.
+        #
+        json_text = None
+        start = time.time()
+        try:
+            for line in out.splitlines():
+                if json_text is not None:
+                    line = line.rstrip()
+                    if not json_text:
+                        if line == '{':
+                            json_text += line
+                        else:
+                            raise Exception("Could not find start of JSON in first-pass output")
+                    else:
+                        json_text += line
+                elif line.startswith("[Parsed_loudnorm"):
+                    json_text = ''
+            if not json_text:
+                raise Exception("No JSON result from first-pass output")
+
+            info = json.loads(json_text)
+            adjustment = "%s:linear=true:measured_I=%s:measured_TP=%s:measured_LRA=%s:measured_thresh=%s:offset=%s" % (
+                            std_loudnorm,
+                            info["input_i"], info["input_tp"], info["input_lra"],
+                            info["input_thresh"], info["target_offset"],
+                        )
+            tmp = None
+            tmp = self.path[:-self.from_len] + '.tmp' + self.from_ext
+            self.run(['ffmpeg', '-i', self.path, '-af', adjustment, '-c:v', 'copy', tmp])
+            os.rename(tmp, self.path)
+            delta = time.time() - start
+            log.info("%s: I:%s TP:%s LRA:%s", self.name, info["input_i"], info["input_tp"], info["input_lra"])
+            return {"adjustments": adjustment, "duration": delta}
+        except Exception as e:
+            error("%s", e, exc=e)
+            return {"adjustments": None, "duration": None, "error": str(e)}
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
+                log.warning("Removed %s", tmp)
+
+
+if __name__ == '__main__':
+    # multiprocessing.set_start_method('forkserver')
+
+    args = arg_parse()
+
+    tmp = None
+    found = 0
+    if args.verbose:
+        log.setLevel(logging.INFO)
+    log.info("Start")
+
+    results = {}
+
+    with multiprocessing.Pool(args.simultaneous_tasks) as pool:
+        try:
+            for path in args.path:
+                if os.path.isdir(path):
+                    log.info("Scanning %s", path)
+                    for dirpath, dirnames, filenames in os.walk(path, onerror=error, followlinks=True):
+                        for fname in filenames:
+                            if fname.endswith('.' + args.from_ext):
+                                wpath = os.path.join(dirpath, fname)
+                                t = Task(wpath, args)
+                                results[wpath] = pool.apply_async(t.process, error_callback=t.error)
+                                found += 1
+                else:
+                    log.info("File %s", path)
+                    t = Task(path, args)
+                    results[path] = pool.apply_async(t.process, error_callback=t.error)
+                    found += 1
+        except Exception as e:
+            error("Exception: %s", e, exc=e)
+
+        log.info("%r task%s scheduled" % (found, '' if found == 1 else 's'))
+        pool.close()
+
+        answers = {}
+        if errors:
+            error("%d errors detected" % errors)
+            pool.terminate()
+        else:
+            try:
+                while results:
+                    for path, result in list(results.items()):
+                        try:
+                            answers[path] = result.get(0.5)
+                            del results[path]
+                        except multiprocessing.TimeoutError:
+                            pass
+                pool.join()
+                log.debug("Joined")
+                for path, answer in sorted(answers.items()):
+                    log.info("ANS %s: %r" % (path, answer))
+            except KeyboardInterrupt:
+                error("Ctrl-C")
+                pool.terminate()
+    exit(errors)
