@@ -20,21 +20,23 @@
 import os
 import sys
 import time
+import signal
 import json
 import argparse
 import subprocess
+from collections import deque as Queue
+from taskforce import poll as Poll
+# import multiprocessing
 # import traceback
 # import inspect
 import logging
-from multiprocessing import cpu_count
-import multiprocessing
 
 DEF_THRESHOLD = -0.1
 DEF_LIMIT = 3
 DEF_FROM_EXT = 'm4a'
 DEF_STYLE = 'loudnorm'
 
-#  Supported styles.  The value indicates whether the Task
+#  Supported styles.  The value indicates whether the Workload
 #  object should be instantiated per audio file, or per
 #  directory containing audio files (ie ablums).
 #
@@ -44,13 +46,25 @@ SUPPORTED_STYLES = {
         'album': True,
     }
 
-TRACE = False
-TRACE = True
+#  After this time, unterminated children will be sent SIGKILL.  The time is the
+#  number of seconds to wait after the last successful reap before giving up.
+#
+TERMINATE_WAIT = 3
+
+#  After this much idle time, report activity
+#
+IDLE_SECS = 1
 
 errors = 0
 
-logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s')
+logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', datefmt="%Y-%m-%d %H:%M:%S")
 log = logging.getLogger()
+_logfd = None
+if log.handlers:
+    if hasattr(log.handlers[0], 'stream'):
+        _logfd = log.handlers[0].stream.fileno()
+    elif hasattr(log.handlers[0], 'socket'):
+        _logfd = log.handlers[0].socket
 
 
 def arg_parse():
@@ -121,9 +135,9 @@ For example:
                     help='dB threshold below which volume is adjusted, default %.2f' % DEF_THRESHOLD)
     p.add_argument('-l', '--limit', action='store', metavar='num', default=DEF_LIMIT, type=positive_int,
                     help='Limit on passes to adjust volume, default %r' % DEF_LIMIT)
-    p.add_argument('-s', '--simultaneous-tasks', action='store', metavar='num', type=positive_int,
+    p.add_argument('-s', '--simultaneous-tasks', action='store', metavar='num', type=positive_int, default=os.cpu_count(),
                     help='Number of simultaneous tasks to run.  '
-                         'Default is the number of CPU threads which is %r on this system' % cpu_count())
+                         'Default is the number of CPU threads which is %r on this system' % os.cpu_count())
     p.add_argument('path', nargs='+', action='store', help='Path or paths to descend')
 
     return p.parse_args()
@@ -150,30 +164,52 @@ def error(fmt, *fargs, **kargs):
     exit(99)
 
 
-class Task(object):
+class Workload(object):
+    """
 
-    def __init__(self, path, args):
-        self.name = None
-        self.path = path
-        parts = path.split(os.path.sep)
-        if len(parts) > 2:
-            self.name = parts[0] + '/.../' + parts[-1]
-        else:
-            self.name = path
+        Workload to be run as a separate process.  The class is instantiated in the parent
+        process, normally just before it is queued.  The actual processing will occur when
+        the object is called (via the __call__ method).
+
+        The object is called with a single argument, which is a Python logging instance.
+        All other input and config must be provided via keyword args during
+        instantitation.
+
+        This method should return a JSON-serializable object containing the results of the
+        workload.  Stdin, stdout, and stderr will be attached to os.devnull.  Any error
+        or status reporting must be done via the log instance or embedded in the returned
+        object.
+    """
+    def __init__(self, **args):
         self.args = args
+        self.name = None
+        self.path = args['path']
+        self.limit = args.get('limit', DEF_LIMIT)
+        self.threshold = args.get('threshold', DEF_THRESHOLD)
+        parts = self.path.split(os.path.sep)
+        if len(parts) > 3:
+            self.name = os.path.sep.join([parts[0], '...'] + parts[-2:])
+        else:
+            self.name = self.path
         self.start = None
         self.count = 0
-        self.from_ext = '.' + args.from_ext
+        self.from_ext = '.' + self.args['from_ext']
         self.from_len = len(self.from_ext)
 
-        if not hasattr(self, args.style):
-            raise Exception("Attempt to process with unsupported style %r" % args.style)
-        self.process = getattr(self, args.style)
+        if not hasattr(self, args['style']):
+            raise Exception("Attempt to process with unsupported style %r" % args['style'])
+        self._process = getattr(self, args['style'])
 
         #  Check for accessibility early
         #
         with open(self.path, 'rb'):
             pass
+
+    def __str__(self):
+        return self.name
+
+    def __call__(self):
+        return self._process()
 
     def error(self, fmt, *fargs, **kwargs):
         kwargs['name'] = self.name
@@ -204,35 +240,32 @@ class Task(object):
         return max_db
 
     def track(self):
-        if self.args.dryrun:
-            return {"adjustments": None, "duration": None}
+        if self.args.get('dryrun'):
+            return {"cycles": None}
         tmp = None
         runs = 0
-        start = time.time()
         try:
             max_db = self.get_db()
-            for attempt in range(self.args.limit):
-                if max_db < self.args.threshold:
+            for attempt in range(self.limit):
+                if max_db < self.threshold:
                     tmp = self.path[:-self.from_len] + '.tmp' + self.from_ext
                     self.run(['ffmpeg', '-i', self.path, '-af', 'volume=%.1fdB' % -max_db, '-c:v', 'copy', tmp])
                     runs += 1
                     os.rename(tmp, self.path)
                     prev_db = max_db
                     max_db = self.get_db()
-                if max_db >= self.args.threshold:
+                if max_db >= self.threshold:
                     break
                 if abs(max_db - prev_db) < 0.01:
-                    log.info("%s: No significant change in dB %.2f after %r adjustments", self.name, max_db, runs)
+                    log.info("%s: No significant change in dB %.2f after %r cycles", self.name, max_db, runs)
                     break
-            if max_db < self.args.threshold and runs == self.args.limit:
+            if max_db < self.threshold and runs == self.limit:
                 log.warning("%s: Max dB %.2f still below threshold %.2f after %r attempt%s",
-                            self.name, max_db, self.args.threshold, runs, '' if runs == 1 else 's')
-            delta = time.time() - start
-            log.info("%s: %.1f dB vol change %.1f secs (adj %d)", self.name, -max_db, delta, runs)
-            return {"adjustments": runs, "duration": delta}
-        except Exception as e:
-            error("%s", e, exc=e)
-            return {"adjustments": None, "duration": None, "error": str(e)}
+                            self.name, max_db, self.threshold, runs, '' if runs == 1 else 's')
+            log.debug("%s: %.1f dB vol change (adj %d)", self.name, -max_db, runs)
+            return {"cycles": runs}
+        except Exception:
+            raise
         finally:
             if tmp and os.path.exists(tmp):
                 os.unlink(tmp)
@@ -246,7 +279,6 @@ class Task(object):
         #  lump of JSON we want at the end.
         #
         json_text = None
-        start = time.time()
         try:
             for line in out.splitlines():
                 if json_text is not None:
@@ -273,32 +305,276 @@ class Task(object):
             tmp = self.path[:-self.from_len] + '.tmp' + self.from_ext
             self.run(['ffmpeg', '-i', self.path, '-af', adjustment, '-c:v', 'copy', tmp])
             os.rename(tmp, self.path)
-            delta = time.time() - start
-            log.info("%s: I:%s TP:%s LRA:%s", self.name, info["input_i"], info["input_tp"], info["input_lra"])
-            return {"adjustments": adjustment, "duration": delta}
-        except Exception as e:
-            error("%s", e, exc=e)
-            return {"adjustments": None, "duration": None, "error": str(e)}
+            log.debug("%s: I:%s TP:%s LRA:%s", self.name, info["input_i"], info["input_tp"], info["input_lra"])
+            return {"adjustment": adjustment}
+        except Exception:
+            raise
         finally:
             if tmp and os.path.exists(tmp):
                 os.unlink(tmp)
                 log.warning("Removed %s", tmp)
 
 
-if __name__ == '__main__':
-    # multiprocessing.set_start_method('forkserver')
+class Task(object):
+    """
+        Wrapping to manage an individual workload.
 
+        This provides the necessary state and invocation
+        to run a workload and collect its result.
+
+        The workload must be callable (via a __call__() method
+        and this method must return a JSON-serializable object.
+    """
+    def __init__(self, workload):
+        self.workload = workload
+        self.fd = None
+        self.pid = None
+        self.code = None
+        self.signal = None
+        self.started = None
+        self.duration = None
+        self.result = None
+        self._json_bytes = b''
+
+    def __str__(self):
+        return 'Task(' + str(self.workload) + ')'
+
+    def fileno(self):
+        return self.fd
+
+    def _closeall(self, exclude=set()):
+        for fd in range(100):
+            if fd not in exclude:
+                try:
+                    os.close(fd)
+                except:
+                    pass
+
+    def start(self):
+        fr_child, to_parent = os.pipe()
+        pid = os.fork()
+        if pid:
+            self.pid = pid
+            self.fd = fr_child
+            self.started = time.time()
+            os.close(to_parent)
+            return
+
+        self._closeall({to_parent, _logfd})
+        nullfd = os.open(os.devnull, os.O_RDWR)
+        os.dup2(nullfd, 1)
+        if _logfd != 2:
+            os.dup2(nullfd, 2)
+
+        code = 0
+        try:
+            resp = self.workload()
+        except Exception as e:
+            resp = {'error': str(e)}
+            code = 2
+        try:
+            json_bytes = (json.dumps(resp) + os.linesep).encode('utf-8')
+            os.write(to_parent, json_bytes)
+        except Exception as e:
+            log.error("%s: Failed to write response -- %s", self, e)
+            code = 3
+        os._exit(code)
+
+    def finalize(self):
+        #  To avoid blocking, this should be called only when input is available.
+        #
+        buf = os.read(self.fd, 102400)
+        if buf:
+            self._json_bytes += buf
+            return False
+        os.close(self.fd)
+        self.result = json.loads(self._json_bytes.decode('utf-8'))
+        self.duration = time.time() - self.started
+        self._json_bytes = None
+        return True
+
+
+class Pool(object):
+    """
+        Manage a group of Tasks.
+
+        Tasks may be pending, running, exiting, or completed.
+
+        Exiting tasks have closed their reporting file descriptor but have not yet been
+        reaped for an exit code.
+
+        Once all tasks have been added to a Pool instance, processing is started by
+        calling it(via the __call__() method).
+
+        Processing stops when the pending, running, and exiting queues are empty.  At that
+        point, all results are available and can be access by iterating over the Pool
+        instance or accessing as a list.
+
+        Premature termination can be triggered with a call to the terminate() method, which
+        would typically be called from a signal handler as control otherwise remains in
+        the instance call.
+    """
+    def __init__(self, run_limit=None, log=None):
+        self.run_limit = os.cpu_count() if run_limit is None else run_limit
+        self.pending = Queue()
+        self.running = Queue()
+        self.exiting = Queue()
+        self.completed = Queue()
+        self.pset = Poll.poll()
+
+    #  Support operation as a context manager
+    #
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        if exc_type:
+            self.terminate()
+
+    #  Support operation as a sequence.  The
+    #  sequence operates over the completed task list.
+    #
+    def __iter__(self):
+        for task in self.completed:
+            yield task
+
+    def __len__(self):
+        return len(self.completed)
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            return [self.completed[x] for x in range(*key.indices(len(self.completed)))]
+        elif isinstance(key, int):
+            if key < 0:
+                key += len(self.completed)
+            if key < 0 or key >= len(self.completed):
+                raise IndexError("Index %r is out of range" % key)
+            else:
+                return self.completed[key]
+        else:
+            raise TypeError("Invalid type for argument %r" % key)
+
+    def append(self, workload):
+        self.pending.append(Task(workload))
+
+    def extend(self, workload_list):
+        for workload in workload_list:
+            self.append(workload)
+
+    def _reap(self):
+        reaped = 0
+        for task in list(self.exiting):
+            tpid, code = os.waitpid(task.pid, os.WNOHANG)
+            if tpid:
+                task.code = code
+                self.exiting.remove(task)
+                self.completed.append(task)
+                reaped += 1
+        return reaped
+
+    def _reap_all(self):
+        #  Reap all exiting tasks for up to TERMINATE_WAIT secs
+        #
+        toolong = time.time() + TERMINATE_WAIT
+        while self.exiting and time.time() < toolong:
+            while self._reap():
+                continue
+            time.sleep(0.1)
+
+    def terminate(self):
+        start = time.time()
+
+        #  Empty the pending queue into the completed queue
+        #  The code and pid remaing None indicating the task
+        #  never ran.
+        #
+        while self.pending:
+            self.completed.append(self.pending.popleft())
+
+        running_total = len(self.running) + len(self.exiting)
+
+        #  If there are any exiting tasks, send a SIGTERM to hurry them up
+        #
+        for task in self.exiting:
+            task.signal = signal.SIGTERM
+            os.kill(task.signal, task.pid)
+
+        #  SIGTERM all running tasks and add them to the exiting list
+        #
+        while self.running:
+            task = self.running.popleft()
+            task.signal = signal.SIGTERM
+            self.exiting.append(task)
+            os.kill(task.signal, task.pid)
+
+        self._reap_all()
+
+        #  If any tasks are still running, issue SIGKILL
+        #
+        if self.exiting:
+            hung_total = len(self.exiting)
+            log.info("%r of %r task%s failed to terminate after %s secs, escalating",
+                            hung_total, running_total, '' if running_total == 1 else 's')
+            for task in self.exiting:
+                task.signal = signal.SIGKILL
+                os.kill(task.signal, task.pid)
+            self._reap_all()
+            if self.exiting:
+                log.error("%r of %r hung task%s failed to exit on SIGKILL after %r secs",
+                                len(self.exiting), hung_total, '' if hung_total == 1 else 's', TERMINATE_WAIT)
+        else:
+            log.info("All %r task%s were terminated normally in %.1f secs",
+                            running_total, '' if running_total == 1 else 's', time.time() - start)
+
+    def __call__(self):
+        pending_total = len(self.pending)
+        log.info("Starting with %r pending task%s", pending_total, '' if pending_total == 1 else 's')
+
+        changes = False
+        while self.pending or self.running:
+            while self.pending and len(self.running) < self.run_limit:
+                task = self.pending.popleft()
+                task.start()
+                self.pset.register(task, Poll.POLLIN)
+                self.running.append(task)
+                changes = True
+                log.debug("Started %s", task.workload)
+
+            self._reap()
+
+            ev_list = self.pset.poll(IDLE_SECS * 1000)
+            if ev_list:
+                for task, ev in ev_list:
+                    if task.finalize():
+                        self.running.remove(task)
+                        self.pset.unregister(task)
+                        self.exiting.append(task)
+                        changes = True
+            elif changes:
+                log.info("%r pending, %r running, %r exiting, %r completed",
+                                len(self.pending), len(self.running), len(self.exiting), len(self.completed))
+                changes = False
+
+        log.info("Processing completed, waiting for %r to exit", len(self.exiting))
+        self._reap_all()
+        if self.exiting:
+            log.error("%r task%s did not exit after final wait", len(self.exiting), '' if len(self.exiting) == 1 else 's')
+
+
+if __name__ == '__main__':
     args = arg_parse()
 
     tmp = None
-    found = 0
     if args.verbose:
         log.setLevel(logging.INFO)
-    log.info("Start")
+
+    log.info("Allowing %d simultaneous tasks", args.simultaneous_tasks)
+    start_time = time.time()
 
     results = {}
 
-    with multiprocessing.Pool(args.simultaneous_tasks) as pool:
+    with Pool(args.simultaneous_tasks) as pool:
+        vargs = vars(args).copy()
         try:
             for path in args.path:
                 if os.path.isdir(path):
@@ -306,39 +582,21 @@ if __name__ == '__main__':
                     for dirpath, dirnames, filenames in os.walk(path, onerror=error, followlinks=True):
                         for fname in filenames:
                             if fname.endswith('.' + args.from_ext):
-                                wpath = os.path.join(dirpath, fname)
-                                t = Task(wpath, args)
-                                results[wpath] = pool.apply_async(t.process, error_callback=t.error)
-                                found += 1
+                                vargs['path'] = os.path.join(dirpath, fname)
+                                log.debug("Found %s", vargs['path'])
+                                pool.append(Workload(**vargs))
                 else:
                     log.info("File %s", path)
-                    t = Task(path, args)
-                    results[path] = pool.apply_async(t.process, error_callback=t.error)
-                    found += 1
+                    vargs['path'] = path
+                    pool.append(Workload(**vargs))
         except Exception as e:
             error("Exception: %s", e, exc=e)
 
-        log.info("%r task%s scheduled" % (found, '' if found == 1 else 's'))
-        pool.close()
-
-        answers = {}
-        if errors:
-            error("%d errors detected" % errors)
-            pool.terminate()
-        else:
-            try:
-                while results:
-                    for path, result in list(results.items()):
-                        try:
-                            answers[path] = result.get(0.5)
-                            del results[path]
-                        except multiprocessing.TimeoutError:
-                            pass
-                pool.join()
-                log.debug("Joined")
-                for path, answer in sorted(answers.items()):
-                    log.info("ANS %s: %r" % (path, answer))
-            except KeyboardInterrupt:
-                error("Ctrl-C")
-                pool.terminate()
-    exit(errors)
+        pool()
+        wallclock = time.time() - start_time
+        exectime = 0
+        for task in pool:
+            exectime += task.duration
+            if 'error' in task.result:
+                log.error("%s -- %s", task.workload, task.result['error'])
+        log.info("Wallclock %.1f secs, execution time %.1f secs, speedup %.1f", wallclock, exectime, exectime / wallclock)
