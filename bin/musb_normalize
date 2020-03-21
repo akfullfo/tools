@@ -24,6 +24,7 @@ import signal
 import json
 import argparse
 import subprocess
+import errno
 from collections import deque as Queue
 from taskforce import poll as Poll
 # import multiprocessing
@@ -184,6 +185,7 @@ class Workload(object):
         self.args = args
         self.name = None
         self.path = args['path']
+        self.files = args.get('files', [])
         self.limit = args.get('limit', DEF_LIMIT)
         self.threshold = args.get('threshold', DEF_THRESHOLD)
         parts = self.path.split(os.path.sep)
@@ -202,8 +204,12 @@ class Workload(object):
 
         #  Check for accessibility early
         #
-        with open(self.path, 'rb'):
-            pass
+        if SUPPORTED_STYLES[args['style']]:
+            if not os.path.isdir(self.path):
+                raise Exception("For album-style processing path %r must be a directory" % path)
+        else:
+            with open(self.path, 'rb'):
+                pass
 
     def __str__(self):
         return self.name
@@ -218,8 +224,9 @@ class Workload(object):
     def run(self, cmd):
         return subprocess.check_output(cmd, universal_newlines=True, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
 
-    def get_db(self):
-        out = self.run(['ffmpeg', '-i', self.path, '-af', 'volumedetect', '-vn', '-sn', '-dn', '-f', 'null', '/dev/null'])
+    def get_db(self, path):
+        cmd = ['ffmpeg', '-i', path, '-af', 'volumedetect', '-vn', '-sn', '-dn', '-f', 'null', '/dev/null']
+        out = self.run(cmd)
 
         max_db = None
         for line in out.splitlines():
@@ -232,7 +239,7 @@ class Workload(object):
                     max_db = float(max_db)
                 break
         if max_db is None:
-            self.error("No max_volume found")
+            self.warning("No max_volume found by: %s", ' '.join(cmd))
             max_db = 0.0
         elif max_db > 0.01:
             self.error("Detected positive dB %.1f", max_db)
@@ -245,7 +252,7 @@ class Workload(object):
         tmp = None
         runs = 0
         try:
-            max_db = self.get_db()
+            max_db = self.get_db(self.path)
             for attempt in range(self.limit):
                 if max_db < self.threshold:
                     tmp = self.path[:-self.from_len] + '.tmp' + self.from_ext
@@ -253,7 +260,7 @@ class Workload(object):
                     runs += 1
                     os.rename(tmp, self.path)
                     prev_db = max_db
-                    max_db = self.get_db()
+                    max_db = self.get_db(self.path)
                 if max_db >= self.threshold:
                     break
                 if abs(max_db - prev_db) < 0.01:
@@ -264,6 +271,38 @@ class Workload(object):
                             self.name, max_db, self.threshold, runs, '' if runs == 1 else 's')
             log.debug("%s: %.1f dB vol change (adj %d)", self.name, -max_db, runs)
             return {"cycles": runs}
+        except Exception:
+            raise
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
+                log.warning("Removed %s", tmp)
+
+    def album(self):
+        if self.args.get('dryrun'):
+            return {"cycles": None}
+        tmp = None
+        max_db = None
+        try:
+            for fname in self.files:
+                path = os.path.join(self.path, fname)
+                db = self.get_db(path)
+                if max_db is None or max_db < db:
+                    max_db = db
+                    log.debug("%s/%s new max %.2f", self.name, fname, max_db)
+                else:
+                    log.debug("%s/%s max %.2f is lower", self.name, fname, max_db)
+            if max_db < self.threshold:
+                log.info("%s: %.1f dB vol change", self.name, -max_db)
+                for fname in self.files:
+                    path = os.path.join(self.path, fname)
+                    tmp = path[:-self.from_len] + '.tmp' + self.from_ext
+                    self.run(['ffmpeg', '-i', path, '-af', 'volume=%.1fdB' % -max_db, '-c:v', 'copy', tmp])
+                    os.rename(tmp, path)
+                return {"db_changed": max_db}
+            else:
+                log.debug("%s: No vol change, max dB %.2f", self.name, max_db)
+                return {"db_unchanged": max_db}
         except Exception:
             raise
         finally:
@@ -301,11 +340,12 @@ class Workload(object):
                             info["input_i"], info["input_tp"], info["input_lra"],
                             info["input_thresh"], info["target_offset"],
                         )
-            tmp = None
-            tmp = self.path[:-self.from_len] + '.tmp' + self.from_ext
-            self.run(['ffmpeg', '-i', self.path, '-af', adjustment, '-c:v', 'copy', tmp])
-            os.rename(tmp, self.path)
-            log.debug("%s: I:%s TP:%s LRA:%s", self.name, info["input_i"], info["input_tp"], info["input_lra"])
+            if not self.args.get('dryrun'):
+                tmp = None
+                tmp = self.path[:-self.from_len] + '.tmp' + self.from_ext
+                self.run(['ffmpeg', '-i', self.path, '-af', adjustment, '-c:v', 'copy', tmp])
+                os.rename(tmp, self.path)
+                log.debug("%s: I:%s TP:%s LRA:%s", self.name, info["input_i"], info["input_tp"], info["input_lra"])
             return {"adjustment": adjustment}
         except Exception:
             raise
@@ -360,24 +400,30 @@ class Task(object):
             os.close(to_parent)
             return
 
-        self._closeall({to_parent, _logfd})
-        nullfd = os.open(os.devnull, os.O_RDWR)
-        os.dup2(nullfd, 1)
-        if _logfd != 2:
-            os.dup2(nullfd, 2)
-
         code = 0
         try:
-            resp = self.workload()
+            self._closeall({to_parent, _logfd})
+            nullfd = os.open(os.devnull, os.O_RDWR)
+            os.dup2(nullfd, 1)
+            if _logfd != 2:
+                os.dup2(nullfd, 2)
+
+            try:
+                resp = self.workload()
+            except Exception as e:
+                resp = {'error': str(e)}
+                code = 2
+            try:
+                json_bytes = (json.dumps(resp) + os.linesep).encode('utf-8')
+                os.write(to_parent, json_bytes)
+            except Exception as e:
+                log.error("%s: Failed to write response -- %s", self, e)
+                code = 3
+        except KeyboardInterrupt:
+            code = 1
         except Exception as e:
-            resp = {'error': str(e)}
-            code = 2
-        try:
-            json_bytes = (json.dumps(resp) + os.linesep).encode('utf-8')
-            os.write(to_parent, json_bytes)
-        except Exception as e:
-            log.error("%s: Failed to write response -- %s", self, e)
-            code = 3
+            log.error("%s: Exception -- %s", self, e)
+            code = 4
         os._exit(code)
 
     def finalize(self):
@@ -464,12 +510,18 @@ class Pool(object):
     def _reap(self):
         reaped = 0
         for task in list(self.exiting):
-            tpid, code = os.waitpid(task.pid, os.WNOHANG)
-            if tpid:
-                task.code = code
+            try:
+                tpid, code = os.waitpid(task.pid, os.WNOHANG)
+                if tpid:
+                    task.code = code
+                    self.exiting.remove(task)
+                    self.completed.append(task)
+                    reaped += 1
+            except ChildProcessError:
+                task.code = errno.ECHILD
                 self.exiting.remove(task)
                 self.completed.append(task)
-                reaped += 1
+                pass
         return reaped
 
     def _reap_all(self):
@@ -482,6 +534,12 @@ class Pool(object):
             time.sleep(0.1)
 
     def terminate(self):
+        def kill(sig, pid):
+            try:
+                os.kill(sig, pid)
+            except ProcessLookupError:
+                pass
+
         start = time.time()
 
         #  Empty the pending queue into the completed queue
@@ -497,7 +555,7 @@ class Pool(object):
         #
         for task in self.exiting:
             task.signal = signal.SIGTERM
-            os.kill(task.signal, task.pid)
+            kill(task.signal, task.pid)
 
         #  SIGTERM all running tasks and add them to the exiting list
         #
@@ -505,7 +563,7 @@ class Pool(object):
             task = self.running.popleft()
             task.signal = signal.SIGTERM
             self.exiting.append(task)
-            os.kill(task.signal, task.pid)
+            kill(task.signal, task.pid)
 
         self._reap_all()
 
@@ -514,16 +572,16 @@ class Pool(object):
         if self.exiting:
             hung_total = len(self.exiting)
             log.info("%r of %r task%s failed to terminate after %s secs, escalating",
-                            hung_total, running_total, '' if running_total == 1 else 's')
+                            hung_total, running_total, '' if running_total == 1 else 's', time.time() - start)
             for task in self.exiting:
                 task.signal = signal.SIGKILL
-                os.kill(task.signal, task.pid)
+                kill(task.signal, task.pid)
             self._reap_all()
             if self.exiting:
                 log.error("%r of %r hung task%s failed to exit on SIGKILL after %r secs",
                                 len(self.exiting), hung_total, '' if hung_total == 1 else 's', TERMINATE_WAIT)
-        else:
-            log.info("All %r task%s were terminated normally in %.1f secs",
+        elif running_total > 0:
+            log.info("All %r task%s were terminated in %.1f secs",
                             running_total, '' if running_total == 1 else 's', time.time() - start)
 
     def __call__(self):
@@ -580,19 +638,47 @@ if __name__ == '__main__':
                 if os.path.isdir(path):
                     log.info("Scanning %s", path)
                     for dirpath, dirnames, filenames in os.walk(path, onerror=error, followlinks=True):
-                        for fname in filenames:
-                            if fname.endswith('.' + args.from_ext):
-                                vargs['path'] = os.path.join(dirpath, fname)
-                                log.debug("Found %s", vargs['path'])
-                                pool.append(Workload(**vargs))
+                        dirnames.sort()
+                        target_files = [fname for fname in filenames if fname.endswith('.' + args.from_ext)]
+                        if not target_files:
+                            continue
+                        if SUPPORTED_STYLES[args.style]:
+                            vargs['path'] = dirpath
+                            vargs['files'] = target_files
+                            log.debug("Found %r files in album %s", len(target_files), vargs['path'])
+                            pool.append(Workload(**vargs))
+                        else:
+                            for fname in target_files:
+                                if fname.endswith('.' + args.from_ext):
+                                    vargs['path'] = os.path.join(dirpath, fname)
+                                    log.debug("Found %s", vargs['path'])
+                                    pool.append(Workload(**vargs))
+                elif SUPPORTED_STYLES[args.style]:
+                    raise Exception("Album-style processing not available on single file %r" % path)
                 else:
                     log.info("File %s", path)
                     vargs['path'] = path
                     pool.append(Workload(**vargs))
+        except KeyboardInterrupt as e:
+            log.error("KeyboardInterrupt during scan")
+            log.error("%s", e)
+            exit(1)
+        except Exception as e:
+            error("Exception during scan: %s", e, exc=e)
+            exit(2)
+
+        # while pool.pending:
+        #     print(pool.pending.popleft().workload.path)
+        # exit(0)
+        try:
+            pool()
+        except KeyboardInterrupt:
+            log.error("KeyboardInterrupt")
+            exit(1)
         except Exception as e:
             error("Exception: %s", e, exc=e)
+            exit(2)
 
-        pool()
         wallclock = time.time() - start_time
         exectime = 0
         for task in pool:
@@ -600,3 +686,4 @@ if __name__ == '__main__':
             if 'error' in task.result:
                 log.error("%s -- %s", task.workload, task.result['error'])
         log.info("Wallclock %.1f secs, execution time %.1f secs, speedup %.1f", wallclock, exectime, exectime / wallclock)
+        exit(0)
