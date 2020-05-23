@@ -201,9 +201,11 @@ def status(out=None):
             code = p.wait()
         except Exception as e:
             error("%r failed -- %s", cmdname, e)
+            return
 
         if code != 0:
             error("%r exited %d -- %s", cmdname, ((code >> 8) & 0xff, err.strip()))
+            return
     else:
         cmdname = '(sample)'
 
