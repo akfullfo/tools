@@ -37,6 +37,12 @@ DEF_LIMIT = 3
 DEF_FROM_EXT = 'm4a'
 DEF_STYLE = 'loudnorm'
 
+#  Example from: http://peterforgacs.github.io/2018/05/20/Audio-normalization-with-ffmpeg/
+#STD_LOUDNORM = 'loudnorm=I=-23:LRA=7:tp=-2:print_format=json'
+
+#  Example from: http://k.ylo.ph/2016/04/04/loudnorm.html
+STD_LOUDNORM = 'loudnorm=I=-16:LRA=11:tp=-1.5:print_format=json'
+
 #  Supported styles.  The value indicates whether the Workload
 #  object should be instantiated per audio file, or per
 #  directory containing audio files (ie ablums).
@@ -311,8 +317,7 @@ class Workload(object):
                 log.warning("Removed %s", tmp)
 
     def loudnorm(self):
-        std_loudnorm = 'loudnorm=I=-23:LRA=7:tp=-2:print_format=json'
-        out = self.run(['ffmpeg', '-i', self.path, '-af', std_loudnorm, '-f', 'null', '/dev/null'])
+        out = self.run(['ffmpeg', '-i', self.path, '-af', STD_LOUDNORM, '-f', 'null', '/dev/null'])
 
         #  This is ugly.  We need to parse the verbose output until we get to the
         #  lump of JSON we want at the end.
@@ -336,7 +341,7 @@ class Workload(object):
 
             info = json.loads(json_text)
             adjustment = "%s:linear=true:measured_I=%s:measured_TP=%s:measured_LRA=%s:measured_thresh=%s:offset=%s" % (
-                            std_loudnorm,
+                            STD_LOUDNORM,
                             info["input_i"], info["input_tp"], info["input_lra"],
                             info["input_thresh"], info["target_offset"],
                         )
