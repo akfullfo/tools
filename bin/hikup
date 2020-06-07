@@ -29,7 +29,7 @@ import argparse
 
 from taskforce import watch_files, poll
 
-def_retain = 35
+def_retain = 65
 def_reprocess = 5
 def_idle = 10
 def_basedir = '/cameras'
@@ -45,24 +45,24 @@ video_encoding = 'libx264'
 #
 crf_quality = 30
 
-re_is_daydir = re.compile(r'^(\d{4})_(\d{2})_(\d{2})-\d{4}_\d{2}_\d{2}$')
+re_is_daydir_hik = re.compile(r'^(\d{4})_(\d{2})_(\d{2})-\d{4}_\d{2}_\d{2}$')
+re_is_daydir_tri = re.compile(r'^(\d{4})-(\d{2})-(\d{2})$')
 
 
 def parse_args(argv, log=None):
     p = argparse.ArgumentParser(
             formatter_class=argparse.RawDescriptionHelpFormatter,
             description="""
-    Manage jpeg image sequences from Hikvision cameras.
+    Manage jpeg image sequences from Hikvision or Trivision cameras.
 
-    Images arrive via FTP from the camera based on events
-    detected by the camera.
+    Images arrive via FTP from the camera based on events detected by the camera.
 
-    This waits for file system events and collects the
-    day's images sofar into an MP4 movie.
+    This waits for file system events and collects the day's images sofar into an MP4
+    movie.
 
-    The camera should bve the FTP "Picture Filing Interval"
-    set to 1 Day.  When the day changes, this will perform
-    a final MP4 run and then start working on the new day.
+    For Hikvision, the camera should have the FTP "Picture Filing Interval" set to 1 Day.
+    When the day changes, this will perform a final MP4 run and then start working on the
+    new day.
     """
     )
 
@@ -114,12 +114,6 @@ def parse_args(argv, log=None):
     return args, log
 
 
-def hik_dir(tim=None):
-    if tim is None:
-        tim = time.time()
-    return time.strftime("%Y_%m_%d-%Y_%m_%d", time.localtime(tim))
-
-
 def run(cmd):
     try:
         log.debug("Running: %s", cmd)
@@ -139,7 +133,7 @@ def newest(dpath, ext=None):
     newest_mtime = None
     newest_path = None
     if not os.path.exists(dpath):
-        log.debug("No path %r", ext, dpath, newest_path, newest_mtime)
+        log.debug("No path %r", dpath)
         return None, None
     if os.path.isdir(dpath):
         for fname in os.listdir(dpath):
@@ -157,10 +151,20 @@ def newest(dpath, ext=None):
     return newest_mtime, newest_path
 
 
+def is_daydir(path, match=False):
+    if os.path.isdir(path):
+        base, dname = os.path.split(path)
+        m = re_is_daydir_hik.match(dname)
+        if not m:
+            m = re_is_daydir_tri.match(os.path.basename(dname))
+        if m:
+            return m if match else path
+    return None
+
+
 def process(daydir, args, set_latest=False):
     camera = args.name[0]
-    base, dname = os.path.split(daydir)
-    m = re_is_daydir.match(os.path.basename(dname))
+    m = is_daydir(daydir, match=True)
     if not m:
         log.error("Attempt to process non-daydir %r", daydir)
         return
@@ -223,15 +227,6 @@ def process(daydir, args, set_latest=False):
                 os.symlink(outpath, latest)
             except Exception as e:
                 log.warning("Failed to create new latest %r -- %s", latest, e)
-
-
-def is_daydir(path):
-    if os.path.isdir(path):
-        base, dname = os.path.split(path)
-        m = re_is_daydir.match(dname)
-        if m:
-            return path
-    return None
 
 
 def get_daydirs(base):
