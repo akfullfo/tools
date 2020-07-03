@@ -32,6 +32,7 @@ from taskforce import watch_files, poll
 def_retain = 65
 def_reprocess = 5
 def_idle = 10
+def_workdir = '/tmp'
 def_basedir = '/cameras'
 def_destdir = os.path.join(def_basedir, 'web')
 
@@ -79,6 +80,8 @@ def parse_args(argv, log=None):
                     help="Directory to output generated movies and index, default %r" % def_destdir)
     p.add_argument('-b', '--basedir', action='store', metavar='path', default=def_basedir,
                     help="Base directory containing the camera name, default %r" % def_basedir)
+    p.add_argument('-W', '--workdir', action='store', metavar='path', default=def_workdir,
+                    help="Work directory containing the camera name, default %r" % def_workdir)
     p.add_argument('-N', '--no-initial', action='store_false', dest='initial',
                     help="Don't perform immediate processing, wait for an event")
     p.add_argument('-1', '--once', action='store_true', help="Exit after initial processing")
@@ -164,6 +167,12 @@ def is_daydir(path, match=False):
 
 def process(daydir, args, set_latest=False):
     camera = args.name[0]
+
+    camerawork = os.path.join(args.workdir, camera)
+    if not os.path.isdir(camerawork):
+        os.makedirs(camerawork)
+        log.info("Created dir %r", camerawork)
+
     m = is_daydir(daydir, match=True)
     if not m:
         log.error("Attempt to process non-daydir %r", daydir)
@@ -185,7 +194,9 @@ def process(daydir, args, set_latest=False):
         return
 
     outpath = os.path.join(outdir, fname + '.mp4')
-    tmppath = os.path.join(outdir, fname + '.tmp.mp4')
+    tmppath = os.path.join(outdir, fname + '.tmp')
+    workpath = os.path.join(camerawork, 'convert.mp4')
+    concpath = os.path.join(camerawork, 'concat.mp4')
 
     dst_mtime, dst_path = newest(outpath)
     if not args.force:
@@ -193,40 +204,102 @@ def process(daydir, args, set_latest=False):
             log.debug("%s is already up-to-date", dst_path)
             return
 
-    if os.path.exists(tmppath):
-        try:
-            os.unlink(tmppath)
-            log.warning("Removed pre-exisitng tmp file %r", tmppath)
-        except Exception as e:
-            log.error("Could not remove pre-existing %r, giving up", tmppath)
-            return
+    for path in (workpath, concpath):
+        if os.path.exists(path):
+            try:
+                os.unlink(path)
+                log.info("Removed pre-exisitng file %r", path)
+            except Exception as e:
+                log.error("Could not remove pre-existing %r, giving up", path)
+                return
 
-    inglob = os.path.join(daydir, '*.jpg')
-    log.info("Processing %r", inglob)
+    start_t = 0
+    last_run = os.path.join(camerawork, '.lastrun')
+    last_tmp = last_run + '.tmp'
+    list_file = os.path.join(camerawork, 'files.txt')
+    try:
+        with open(last_tmp, 'w') as f:
+            pass
+    except Exception as e:
+        log.error("Could not mark this run -- %s", e)
+
+    try:
+        start_t = os.path.getmtime(last_run)
+    except:
+        log.info("No previous run")
+        pass
+
+    paths = []
+    for fname in os.listdir(daydir):
+        if fname.endswith('.jpg'):
+            path = os.path.join(daydir, fname)
+            if os.path.getmtime(path) > start_t:
+                paths.append(path)
+    if paths:
+        os.rename(last_tmp, last_run)
+    else:
+        try:
+            os.unlink(last_tmp)
+        except:
+            pass
+        log.info("No new files to process")
+        return
+
+    log.info("Processong %d jpgs to mp4", len(paths))
+    with open(list_file, 'w') as f:
+        for path in sorted(paths):
+            f.write("file '%s'\n" % path)
+
     cmd = ['ffmpeg',
             '-loglevel', 'error',
+            '-safe', '0',
+            '-f', 'concat',
+            '-i', list_file,
             '-r', str(frame_rate),
-            '-pattern_type', 'glob',
-            '-i', inglob,
             '-c:v', str(video_encoding),
             '-crf', str(crf_quality),
-            tmppath]
+            workpath]
     delta = run(cmd)
-    if delta is not None:
-        log.info("%s completed in %.1f secs, output: %s", cmd[0], delta, outpath)
-        os.rename(tmppath, outpath)
-        if set_latest:
-            latest = os.path.join(outcam, 'latest.mp4')
-            if os.path.exists(latest):
-                try:
-                    os.unlink(latest)
-                except Exception as e:
-                    log.warning("Failed to remove exisiting %r -- %s", latest, e)
-                    return
+    if delta is None:
+        return
+    log.info("%s jpg to mp4 completed in %.1f secs, output: %s", cmd[0], delta, workpath)
+
+    if os.path.exists(outpath):
+        with open(list_file, 'w') as f:
+            f.write("file '%s'\n" % outpath)
+            f.write("file '%s'\n" % workpath)
+        cmd = ['ffmpeg',
+                '-loglevel', 'error',
+                '-safe', '0',
+                '-f', 'concat',
+                '-i', list_file,
+                '-codec', 'copy',
+                concpath]
+        delta = run(cmd)
+        if delta is None:
+            return
+        log.info("%s mp4 concat completed in %.1f secs, output: %s", cmd[0], delta, concpath)
+        run(['mv', concpath, tmppath])
+        try:
+            os.unlink(workpath)
+        except:
+            pass
+    else:
+        run(['mv', workpath, tmppath])
+    os.rename(tmppath, outpath)
+
+    if set_latest:
+        latest = os.path.join(outcam, 'latest.mp4')
+        if os.path.exists(latest):
             try:
-                os.symlink(outpath, latest)
+                os.unlink(latest)
             except Exception as e:
-                log.warning("Failed to create new latest %r -- %s", latest, e)
+                log.warning("Failed to remove exisiting %r -- %s", latest, e)
+                return
+        try:
+            os.symlink(outpath, latest)
+        except Exception as e:
+            log.warning("Failed to create new latest %r -- %s", latest, e)
 
 
 def get_daydirs(base):
