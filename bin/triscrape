@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+# ________________________________________________________________________
+#
+#  Copyright (C) 2019 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+
+import os
+import re
+import time
+import signal
+import logging
+import logging.handlers
+import argparse
+from html.parser import HTMLParser
+import urllib.request
+from http.client import RemoteDisconnected
+from socket import timeout as SocketTimeout
+
+DEF_DELAY = 300
+DEF_PORT = 80
+DEF_WORKDIR = '/tmp/mov'
+DEF_DESTDIR = '/cameras/mov'
+DEF_SECRETS = '/cameras/.credentials'
+DEF_TIMEOUT = 45
+
+#  Maximum number of pages to pull browsing camera storage.
+#  The camera has a limit of 10,000 files, so this should
+#  be plenty to get all files.
+#
+DEF_MAX_PAGES = 1000
+
+
+def parse_args(argv, log=None):
+    p = argparse.ArgumentParser(
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            description="""
+    Retrieve and manage .mov files from Trivision cameras.  The movies have the
+    advantage of pre-motion recording which is not available from the JPEG FTP
+    upload approach, although the image quality may be a little lower.
+    """
+    )
+
+    p.add_argument('-v', '--verbose', action='store_true', help="Verbose logging")
+    p.add_argument('-q', '--quiet', action='store_true', help="Quiet logging, errors and warnings only")
+    p.add_argument('-e', '--log-stderr', action='store_true', help="Log to stderr, default is syslog")
+    p.add_argument('-D', '--delay', action='store', type=int, metavar='secs', default=DEF_DELAY,
+                    help="Delay between checks for new movies, default %r secs" % DEF_DELAY)
+    p.add_argument('-t', '--timeout', action='store', type=int, metavar='secs', default=DEF_TIMEOUT,
+                    help="Timeout on HTTP gets, default %r secs" % DEF_TIMEOUT)
+    p.add_argument('-M', '--max-pages', action='store', type=int, metavar='num', default=DEF_MAX_PAGES,
+                    help="Maximum number of pages to browse on the camera, default %r" % DEF_MAX_PAGES)
+    p.add_argument('-d', '--destdir', action='store', metavar='path', default=DEF_DESTDIR,
+                    help="Directory to output generated movies and index, default %r" % DEF_DESTDIR)
+    p.add_argument('-W', '--workdir', action='store', metavar='path', default=DEF_WORKDIR,
+                    help="Work directory containing the camera name, default %r" % DEF_WORKDIR)
+    p.add_argument('-H', '--host', action='store', metavar='name[:port]',
+                    help="Hostname or IP to use to contact the camera.  Default is to use the camera name and port 80")
+    p.add_argument('-C', '--credentials', action='store', default=DEF_SECRETS,
+                    help="File to load access credentials from in camera=login:secret format")
+    p.add_argument('-1', '--once', action='store_true', help="Exit after initial processing")
+    p.add_argument('-n', '--dryrun', action='store_true',
+                    help="List the files that would be downloaded without actually downloading them")
+    p.add_argument('-a', '--all', action='store_true',
+                    help="Download all files not yet recorded within selected pages.  Normally processing stops as soon "
+                         "as an existing file is encountered")
+    p.add_argument('name', nargs=1, action='store', help="Camera name")
+
+    args = p.parse_args()
+
+    if args.log_stderr:
+        log_handler = logging.StreamHandler()
+        log_formatter = logging.Formatter(fmt="%(asctime)s %(levelname)s %(message)s")
+    else:
+        logparams = {}
+        for addr in ['/dev/log', '/var/run/log']:
+            if os.path.exists(addr):
+                logparams['address'] = addr
+                break
+        log_handler = logging.handlers.SysLogHandler(**logparams)
+        log_formatter = logging.Formatter(fmt="%(name)s[%(process)d]: %(levelname)s %(message).1000s")
+
+    if not log:
+        log = logging.getLogger()
+        log_handler.setFormatter(log_formatter)
+        log.addHandler(log_handler)
+
+    if args.verbose:
+        log.setLevel(logging.DEBUG)
+    elif args.quiet:
+        log.setLevel(logging.WARNING)
+    else:
+        log.setLevel(logging.INFO)
+
+    if not args.host:
+        args.host = args.name[0]
+    return args, log
+
+
+def cleantemp(camerabase):
+    for fname in os.listdir(camerabase):
+        if fname.endswith('.tmp'):
+            path = os.path.join(camerabase, fname)
+            try:
+                os.unlink(path)
+            except Exception as e:
+                log.warning("Cleanup failed -- %s", e)
+
+
+def set_signals(camerabase):
+    def catch(sig, frame):
+        log.info("Exiting on SIG%s", sig)
+        cleantemp(camerabase)
+        exit(0)
+
+    if signal.signal(signal.SIGINT, catch) == signal.SIG_IGN:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if signal.signal(signal.SIGHUP, catch) == signal.SIG_IGN:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, catch)
+
+
+class Camera(object):
+    def __init__(self, camera, credentials, args):
+        self.top_level_url = 'http://%s/' % args.host
+        self.timeout = args.timeout
+
+        pw_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        pw_mgr.add_password(None, self.top_level_url, credentials[0], credentials[1])
+        handler = urllib.request.HTTPBasicAuthHandler(pw_mgr)
+        opener = urllib.request.build_opener(handler)
+        urllib.request.install_opener(opener)
+
+    def req(self, path, **query):
+        url = self.top_level_url
+        if path:
+            url += path
+        if query:
+            url += '?' + urllib.parse.urlencode(query)
+        return urllib.request.Request(url)
+
+
+class Pages(Camera):
+    def __call__(self, path, **query):
+        with urllib.request.urlopen(self.req(path, **query), timeout=self.timeout) as f:
+            return f.read().decode('utf-8')
+
+
+class Fetch(Camera):
+    def __call__(self, path, fobj):
+        cnt = 0
+        with urllib.request.urlopen(self.req(path), timeout=self.timeout) as f:
+            while True:
+                data = f.read(102400)
+                if data:
+                    fobj.write(data)
+                    cnt += len(data)
+                else:
+                    break
+        return cnt
+
+
+class Browse(HTMLParser):
+    _files = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'a':
+            atts = {}
+            for t, v in attrs:
+                atts[t] = v
+            if 'href' in atts and 'download' in atts:
+                self._files.append((atts['download'], atts['href']))
+
+    def __call__(self):
+        return self._files
+
+
+_re_dt_path = re.compile(r'^\w*_(\d\d\d\d)-(\d\d)-(\d\d)_.*\.\w+$')
+
+
+def dt_path(camera, fname, args):
+    """
+        Build a path from a file name of the form
+
+            ??_YYYY-MM-DD_hh-mm-ss_dd.???
+
+        with a YYYYMMDD date path element, ensuring the
+        resulting directory exists.
+
+        This also checks for ancient files which are to be ignored.
+        The cameras are sometimes slow to set the time via ntp,
+        causing bogus timestamps (typically years 1969 or 1970
+        which is the Unix time_t epoch).
+    """
+    m = _re_dt_path.match(fname)
+    if not m:
+        raise Exception("Could not derive date from %r" % fname)
+
+    if int(m.group(1)) < 2000:
+        log.warning("%s: Ignoring file %r -- camera time not set correctly", camera, fname)
+        return None
+
+    dt = m.group(1) + m.group(2) + m.group(3)
+    odir = os.path.join(args.destdir, camera, dt)
+    if not os.path.isdir(odir):
+        os.makedirs(odir)
+    return os.path.join(odir, fname)
+
+
+def process(camera, credentials, args):
+    need = {}
+    paget = Pages(camera, credentials, args)
+    for page in range(1, args.max_pages + 1):
+        log.debug("%s: Fetching page %d", camera, page)
+        try:
+            ans = paget('en/storagebrowse.asp', type="alarmrecord", curpage=page)
+        except RemoteDisconnected:
+            log.info("%s: Remote disconnected on page %d -- assumed on last page", camera, page)
+            break
+        except SocketTimeout:
+            log.info("%s: Request timed out on page %d -- assumed on last page", camera, page)
+            break
+        existing = False
+        has_any = False
+        browse = Browse()
+        browse.feed(ans)
+        for fname, path in sorted(browse(), reverse=True):
+            opath = dt_path(camera, fname, args)
+            if opath is None:
+                log.warning("%s: Ignoring file %r -- camera time is not set", camera, fname)
+            elif os.path.exists(opath):
+                if not args.all:
+                    existing = True
+                    break
+            else:
+                need[fname] = path
+                has_any = True
+        if existing:
+            log.debug("%s: Stopping at page %d, file %r already transferred", camera, page, fname)
+            break
+        if not has_any:
+            log.info("%s: Stopping at page %d, no files present in page", camera, page)
+            break
+
+    need_cnt = len(need)
+    if need_cnt > 1:
+        log.info("%s: Downloading %d files", camera, need_cnt)
+    else:
+        log.debug("%s: Downloading %d file%s", camera, need_cnt, '' if need_cnt == 1 else 's')
+    for fname in sorted(need):
+        opath = dt_path(camera, fname, args)
+        otemp = os.path.join(args.destdir, camera, fname + '.tmp')
+        if args.dryrun:
+            log.info("Would download %r", fname)
+            log.info("Would download %r to %r and rename to %r", fname, otemp, opath)
+        else:
+            log.debug("%s: Downloading %r", camera, fname)
+            start = time.time()
+            try:
+                with open(otemp, 'wb') as f:
+                    cnt = Fetch(camera, credentials, args)(need[fname], f)
+                os.rename(otemp, opath)
+                delta = time.time() - start
+                kiB = cnt / 1024.0
+                log.info("%s: Downloaded %r (%.0f kiB, %.1f kiB/sec)", camera, fname, kiB, (kiB / delta) if delta > 0.1 else 0)
+            except Exception as e:
+                log.error("%s: Download of %r failed -- %s", camera, fname, e)
+                try:
+                    os.unlink(otemp)
+                except Exception:
+                    pass
+                break
+
+
+def load_credentials(args):
+    try:
+        credentials = {}
+        line_num = 0
+        with open(args.credentials) as f:
+            for line in f:
+                line_num += 1
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' in line:
+                    camera, creds = line.split('=', 1)
+                    camera = camera.strip()
+                    if ':' in creds:
+                        user, pw = creds.split(':', 1)
+                        user = user.strip()
+                        credentials[camera] = (user, pw)
+                    else:
+                        log.error("%s: Ignoring credenitals -- no colon", camera)
+                else:
+                    log.error("Ignoring malformed credenitals in %s:%d", args.credentials, line_num)
+        return credentials
+    except Exception as e:
+        log.error("Could not load credentials -- %s", e)
+        return None
+
+
+def main(argv=None, ilog=None):
+    global log
+    args, log = parse_args(argv, log=ilog)
+
+    camera = args.name[0]
+    camerabase = os.path.join(args.destdir, camera)
+    if not os.path.isdir(camerabase):
+        log.error("%s is not a directory", camerabase)
+        exit(2)
+
+    log.info("Recordings under %r", camerabase)
+
+    set_signals(camerabase)
+
+    credentials = load_credentials(args)
+    if credentials is None:
+        exit(3)
+
+    if camera not in credentials:
+        log.error("%s: No credentials recorded", camera)
+        exit(4)
+
+    exc_count = 0
+    while True:
+        try:
+            next_run = time.time() + args.delay
+            process(camera, credentials[camera], args)
+            exc_count = 0
+        except Exception as e:
+            exc_count += 1
+            if exc_count > 4:
+                log.error("Multiple exceptions, giving up.  Last was %s", e)
+                exit(4)
+            else:
+                log.error("Unexpected exception -- %s", e)
+
+        if args.once:
+            log.info("Exiting due to --once flag")
+            exit(0)
+        delta = next_run - time.time()
+        if exc_count > 0:
+            log.warning("Brief delay before new attempt after exception")
+            delta = 3
+        elif delta < 0:
+            log.warning("Next run due %.1f secs before last run completed", -delta)
+            delta = 3
+        log.debug("%.0f sec delay before next run", delta)
+        time.sleep(delta)
+
+
+main()
