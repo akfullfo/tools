@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+# ________________________________________________________________________
+#
+#  Copyright (C) 2020 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+
+import os
+import time
+import signal
+import logging
+import logging.handlers
+import argparse
+from html.parser import HTMLParser
+import urllib.request
+
+DEF_URL = 'http://www.ercot.com/content/cdr/html/real_time_spp'
+DEF_ZONE = 'LZ_NORTH'
+DEF_DELIVERY = 3.5448
+DEF_LAST = 1
+DEF_TIMEOUT = 30
+
+#  These are the types of pages we can process.  The tuple elements are:
+#    0  - is the url, to be formatted to add the selected date
+#    1  - default number of results, override with --last
+#    2  - the cutover time when the next days data should be available
+#         This is used for default DAM fetches for when tomorrow's data
+#         becomes available.
+#
+PAGE_TYPES = {
+    'RT': ('http://www.ercot.com/content/cdr/html/{yyyymmdd}_real_time_spp', 1, 0),
+    'DAM': ('http://www.ercot.com/content/cdr/html/{yyyymmdd}_dam_spp', 24, 14),
+}
+
+COL0_NAME = 'Oper Day'
+COL1_NAMES = {
+        'Interval Ending': 'RT',
+        'Hour Ending': 'DAM',
+}
+
+DAY_SECS = 24 * 60 * 60
+
+
+def parse_args(argv, log=None):
+    p = argparse.ArgumentParser(
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            description="""
+    Retrieve and parse the ERCOT real-time and day-ahead pricing from:
+    """
+    )
+
+    pt = p.add_mutually_exclusive_group(required=True)
+    pt.add_argument('-d', '--dam', nargs='?', action='store', const=True, metavar='yyyymmdd',
+                    help="Fetch day-ahead market for specified day. Leave date off for latest data")
+    pt.add_argument('-r', '--real-time', nargs='?', action='store', const=True, metavar='yyyymmdd',
+                    help="Fetch real-time prices for specified day. Leave date off for latest data")
+    pt.add_argument('-u', '--url', action='store', metavar='addr', default=DEF_URL,
+                    help="URL to access the pricing info")
+    p.add_argument('-v', '--verbose', action='store_true', help="Verbose logging")
+    p.add_argument('-q', '--quiet', action='store_true', help="Quiet logging, errors and warnings only")
+    p.add_argument('-e', '--log-stderr', action='store_true', help="Log to stderr, default is syslog")
+    p.add_argument('-z', '--zone', action='store', metavar='name', default=DEF_ZONE,
+                    help="Zone to report pricing for, default %r" % DEF_ZONE)
+    p.add_argument('-L', '--last', action='store', type=int, metavar='count',
+                    help="Number of previous results to report, default %r" % DEF_LAST)
+    p.add_argument('-1', '--once', action='store_true', help="Exit after initial processing")
+    p.add_argument('-t', '--timeout', action='store', type=int, metavar='secs', default=DEF_TIMEOUT,
+                    help="Web access timeout, default %r secs" % DEF_TIMEOUT)
+    p.add_argument('-f', '--file', action='store', help="Use data from this file instead of fetching the URL, used for testing")
+    p.add_argument('--delivery', action='store', type=float, metavar='cents', default=DEF_DELIVERY,
+                    help="Current TDU delivery change, default %.4f" % DEF_DELIVERY)
+
+    args = p.parse_args()
+
+    if args.log_stderr:
+        log_handler = logging.StreamHandler()
+        log_formatter = logging.Formatter(fmt="%(asctime)s %(levelname)s %(message)s")
+    else:
+        logparams = {}
+        for addr in ['/dev/log', '/var/run/log']:
+            if os.path.exists(addr):
+                logparams['address'] = addr
+                break
+        log_handler = logging.handlers.SysLogHandler(**logparams)
+        log_formatter = logging.Formatter(fmt="%(name)s[%(process)d]: %(levelname)s %(message).1000s")
+
+    if not log:
+        log = logging.getLogger()
+        log_handler.setFormatter(log_formatter)
+        log.addHandler(log_handler)
+
+    if args.verbose:
+        log.setLevel(logging.DEBUG)
+    elif args.quiet:
+        log.setLevel(logging.WARNING)
+    else:
+        log.setLevel(logging.INFO)
+
+    url = None
+    last = None
+    if args.real_time:
+        url, last, cutoff = PAGE_TYPES['RT']
+        if args.real_time is True:
+            date = time.strftime("%Y%m%d")
+        else:
+            date = args.real_time
+    elif args.dam:
+        url, last, cutoff = PAGE_TYPES['DAM']
+        if args.dam is True:
+            now = time.time()
+            lt = time.localtime(now)
+            if lt.tm_hour >= cutoff:
+                lt = time.localtime(now + DAY_SECS)
+            date = time.strftime("%Y%m%d", lt)
+        else:
+            date = args.dam
+
+    if url is not None:
+        args.url = url.format(yyyymmdd=date)
+
+    if last is None:
+        last = DEF_LAST
+
+    args.last = last
+
+    return args, log
+
+
+def set_signals():
+    def catch(sig, frame):
+        log.info("Exiting on SIG%s", sig)
+        exit(0)
+
+    if signal.signal(signal.SIGINT, catch) == signal.SIG_IGN:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if signal.signal(signal.SIGHUP, catch) == signal.SIG_IGN:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, catch)
+
+
+def fetch(args):
+    resp = ''
+    with urllib.request.urlopen(args.url, timeout=args.timeout) as f:
+        while True:
+            data = f.read(102400)
+            if data:
+                resp += data.decode('utf-8')
+            else:
+                break
+    return resp
+
+
+class Browse(HTMLParser):
+    row = 0
+    col = 0
+    header = False
+    colnames = []
+    currow = []
+    rows = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'tr':
+            self.row += 1
+        elif tag == 'td':
+            self.col += 1
+            self.header = False
+        elif tag == 'th':
+            self.col += 1
+            self.header = True
+
+    def handle_endtag(self, tag):
+        if tag == 'tr':
+            self.col = 0
+            if self.currow and not self.header:
+                self.rows.append(self.currow)
+                self.currow = []
+
+    def handle_data(self, data):
+        if self.row and self.col:
+            data = data.strip()
+            if not data:
+                return
+            if self.header:
+                self.colnames.append(data)
+            else:
+                self.currow.append(data)
+
+
+def main(argv=None, ilog=None):
+    global log
+    args, log = parse_args(argv, log=ilog)
+
+    set_signals()
+
+    if args.file:
+        with open(args.file, 'rt') as f:
+            data = f.read()
+    else:
+        data = fetch(args)
+    b = Browse()
+    b.feed(data)
+    if len(b.colnames) < 3:
+        log.error("Bad colname list: %s", b.colnames)
+    if b.colnames[0] != COL0_NAME:
+        log.error("Expecting %r as first colname, got %r", COL0_NAME, b.colnames[0])
+    if b.colnames[1] not in COL1_NAMES:
+        log.error("Expecting %r as second colname, got %r", ' or '.join(sorted(COL1_NAMES)), b.colnames[1])
+    page_type = COL1_NAMES[b.colnames[1]]
+
+    table_width = len(b.colnames)
+
+    spp_table = {}
+    for colpos in range(2, table_width):
+        spp_table[b.colnames[colpos]] = []
+    if args.zone not in spp_table:
+        log.error("Selected zone %r is not in results", args.zone)
+        return 2
+    rownum = 0
+    for row in b.rows:
+        rownum += 1
+        if len(row) != table_width:
+            log.error("Row %d has %r columns, %d expected", rownum, len(row), table_width)
+            return 2
+        if page_type == 'RT':
+            row_time_t = time.mktime(time.strptime(row[0] + ' ' + row[1] + '00', "%m/%d/%Y %H%M%S"))
+        elif page_type == 'DAM':
+            hour = int(row[1])
+            inc = 0
+            if hour == 24:
+                inc = DAY_SECS
+                hour = 0
+            hour = "%02d" % hour
+            row_time_t = time.mktime(time.strptime(row[0] + ' ' + hour + '0000', "%m/%d/%Y %H%M%S")) + inc
+        else:
+            log.error("Unknown page type %r", page_type)
+            return 2
+        for colpos in range(2, table_width):
+            #  Convert from dollars/megawatt
+            cents_per_kW = float(row[colpos]) * 100.0 / 1000.0
+            spp_table[b.colnames[colpos]].append((row_time_t, cents_per_kW))
+    for pos in reversed(range(0, args.last)):
+        if pos < len(spp_table[args.zone]):
+            selected_recent = spp_table[args.zone][-1 - pos]
+            print("%s: %s  %.2f  %.2f" % (
+                        args.zone,
+                        time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(selected_recent[0])),
+                        selected_recent[1],
+                        selected_recent[1] + args.delivery))
+
+
+exit(main())
