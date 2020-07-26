@@ -18,30 +18,44 @@
 #
 
 import os
+import sys
 import time
-import signal
 import logging
 import logging.handlers
 import argparse
 from html.parser import HTMLParser
 import urllib.request
 
+PROGRAM = os.path.basename(os.path.splitext(sys.argv[0])[0])
+
 DEF_URL = 'http://www.ercot.com/content/cdr/html/real_time_spp'
+DEF_PAGE_TYPE = 'RT'
 DEF_ZONE = 'LZ_NORTH'
 DEF_DELIVERY = 3.5448
 DEF_LAST = 1
+DEF_BASE_DIR = os.path.join(os.sep, 'var', 'local', PROGRAM)
 DEF_TIMEOUT = 30
 
+DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+
+
+class PageType(object):
+    """
+        Attribute class to hold standard configuration for
+        supported ERCOT page types.
+    """
+    def __init__(self, url, last, cutover, outfile):
+        self.url = url
+        self.last = last
+        self.cutover = cutover
+        self.outfile = outfile
+
+
 #  These are the types of pages we can process.  The tuple elements are:
-#    0  - is the url, to be formatted to add the selected date
-#    1  - default number of results, override with --last
-#    2  - the cutover time when the next days data should be available
-#         This is used for default DAM fetches for when tomorrow's data
-#         becomes available.
 #
 PAGE_TYPES = {
-    'RT': ('http://www.ercot.com/content/cdr/html/{yyyymmdd}_real_time_spp', 1, 0),
-    'DAM': ('http://www.ercot.com/content/cdr/html/{yyyymmdd}_dam_spp', 24, 14),
+    'RT': PageType('http://www.ercot.com/content/cdr/html/{yyyymmdd}_real_time_spp', 1, None, 'rt.txt'),
+    'DAM': PageType('http://www.ercot.com/content/cdr/html/{yyyymmdd}_dam_spp', 24, 14, 'dam.txt'),
 }
 
 COL0_NAME = 'Oper Day'
@@ -58,24 +72,46 @@ def parse_args(argv, log=None):
             formatter_class=argparse.RawDescriptionHelpFormatter,
             description="""
     Retrieve and parse the ERCOT real-time and day-ahead pricing from:
+
+    When specified with a base directory, the program maintains this directory tree:
+
+        base_dir/rt.txt                 -- The most recently read real-time data
+        base_dir/dam.txt                -- The most recently read day-ahead data
+        base_dir/YYYYMMDD/rt.txt        -- Accumulated real-time data for that day
+        base_dir/YYYYMMDD/dam.txt       -- Day-ahead data for that day
+
+    The typical approach for using a base directory is to have a crontab like:
+
+        5,20,35,50 * * * *      /usr/local/bin/ercotsum -qb --real-time
+        58        13 * * *      /usr/local/bin/ercotsum -qb --dam
+
+    This covers ERCOT's real-time processing every 15 minutes which typically
+    completes at 2 minutes after the quarter-hour, and ERCOTs day-ahead processing
+    which typically completes at around 12:30pm every day, but they recommend accessing
+    at 2pm.  The 2 minute offset there is just to avoid site congestion at the recommended
+    time.
+
+    Because the day-ahead data changes only once per day, and the data spans two days,
+    the YYYYMMDD directory will be for the first date in the file which is tomorrow's
+    date when run after 2pm.
     """
     )
 
     pt = p.add_mutually_exclusive_group(required=True)
-    pt.add_argument('-d', '--dam', nargs='?', action='store', const=True, metavar='yyyymmdd',
-                    help="Fetch day-ahead market for specified day. Leave date off for latest data")
-    pt.add_argument('-r', '--real-time', nargs='?', action='store', const=True, metavar='yyyymmdd',
-                    help="Fetch real-time prices for specified day. Leave date off for latest data")
-    pt.add_argument('-u', '--url', action='store', metavar='addr', default=DEF_URL,
-                    help="URL to access the pricing info")
+    pt.add_argument('-d', '--dam', action='store_true', help="Fetch day-ahead market")
+    pt.add_argument('-r', '--real-time', action='store_true', help="Fetch real-time prices")
+    pt.add_argument('-D', '--date', action='store', metavar='YYYYMMDD', help="Fetch data for specified day. Default is today")
+    pt.add_argument('-u', '--url', action='store', metavar='addr', default=DEF_URL, help="URL to access the pricing info")
+    p.add_argument('-b', '--base-dir', nargs='?', action='store', metavar='path', const=DEF_BASE_DIR,
+                    help="Base directory for recording current and historical pricing.  With no path, uses %r" % DEF_BASE_DIR)
     p.add_argument('-v', '--verbose', action='store_true', help="Verbose logging")
     p.add_argument('-q', '--quiet', action='store_true', help="Quiet logging, errors and warnings only")
     p.add_argument('-e', '--log-stderr', action='store_true', help="Log to stderr, default is syslog")
     p.add_argument('-z', '--zone', action='store', metavar='name', default=DEF_ZONE,
                     help="Zone to report pricing for, default %r" % DEF_ZONE)
+    p.add_argument('-Z', '--zone-name', action='store_true', help="Include zone name in output")
     p.add_argument('-L', '--last', action='store', type=int, metavar='count',
                     help="Number of previous results to report, default %r" % DEF_LAST)
-    p.add_argument('-1', '--once', action='store_true', help="Exit after initial processing")
     p.add_argument('-t', '--timeout', action='store', type=int, metavar='secs', default=DEF_TIMEOUT,
                     help="Web access timeout, default %r secs" % DEF_TIMEOUT)
     p.add_argument('-f', '--file', action='store', help="Use data from this file instead of fetching the URL, used for testing")
@@ -108,46 +144,34 @@ def parse_args(argv, log=None):
     else:
         log.setLevel(logging.INFO)
 
-    url = None
-    last = None
+    page_type = PAGE_TYPES[DEF_PAGE_TYPE]
+    date = time.strftime("%Y%m%d")
     if args.real_time:
-        url, last, cutoff = PAGE_TYPES['RT']
-        if args.real_time is True:
-            date = time.strftime("%Y%m%d")
-        else:
-            date = args.real_time
+        page_type = PAGE_TYPES['RT']
+        if not args.date:
+            args.date = date
     elif args.dam:
-        url, last, cutoff = PAGE_TYPES['DAM']
-        if args.dam is True:
+        page_type = PAGE_TYPES['DAM']
+        if not args.date:
             now = time.time()
             lt = time.localtime(now)
-            if lt.tm_hour >= cutoff:
+            if lt.tm_hour >= page_type.cutover:
                 lt = time.localtime(now + DAY_SECS)
-            date = time.strftime("%Y%m%d", lt)
-        else:
-            date = args.dam
+            args.date = time.strftime("%Y%m%d", lt)
+    else:
+        if args.base_dir:
+            raise Exception("The --base-dir flag is only supported for standard URLs")
+        if not args.date:
+            args.date = date
+        page_type.url = args.url
+        page_type.last = DEF_LAST
 
-    if url is not None:
-        args.url = url.format(yyyymmdd=date)
+    args.url = page_type.url.format(yyyymmdd=args.date)
 
-    if last is None:
-        last = DEF_LAST
-
-    args.last = last
+    if args.last is None:
+        args.last = page_type.last
 
     return args, log
-
-
-def set_signals():
-    def catch(sig, frame):
-        log.info("Exiting on SIG%s", sig)
-        exit(0)
-
-    if signal.signal(signal.SIGINT, catch) == signal.SIG_IGN:
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-    if signal.signal(signal.SIGHUP, catch) == signal.SIG_IGN:
-        signal.signal(signal.SIGHUP, signal.SIG_IGN)
-    signal.signal(signal.SIGTERM, catch)
 
 
 def fetch(args):
@@ -198,11 +222,41 @@ class Browse(HTMLParser):
                 self.currow.append(data)
 
 
+def output(args, page_type, text):
+    if not args.base_dir:
+        print(os.linesep.join(text))
+        return
+
+    hpath = os.path.join(args.base_dir, args.date)
+    if not os.path.isdir(hpath):
+        os.makedirs(hpath)
+    hpath = os.path.join(hpath, page_type.outfile)
+
+    new_text = os.linesep.join(text) + os.linesep
+    cpath = os.path.join(args.base_dir, page_type.outfile)
+
+    try:
+        with open(cpath, 'rt') as f:
+            old_text = f.read()
+    except Exception as e:
+        log.info("No previous data -- %s", e)
+        old_text = None
+
+    if old_text == new_text:
+        log.info("No change in recorded data, skipping update")
+        return
+
+    ctemp = cpath + '.tmp'
+    with open(ctemp, 'wt') as f:
+        f.write(new_text)
+    os.rename(ctemp, cpath)
+    with open(hpath, 'at') as f:
+        f.write(new_text)
+
+
 def main(argv=None, ilog=None):
     global log
     args, log = parse_args(argv, log=ilog)
-
-    set_signals()
 
     if args.file:
         with open(args.file, 'rt') as f:
@@ -217,7 +271,7 @@ def main(argv=None, ilog=None):
         log.error("Expecting %r as first colname, got %r", COL0_NAME, b.colnames[0])
     if b.colnames[1] not in COL1_NAMES:
         log.error("Expecting %r as second colname, got %r", ' or '.join(sorted(COL1_NAMES)), b.colnames[1])
-    page_type = COL1_NAMES[b.colnames[1]]
+    page_name = COL1_NAMES[b.colnames[1]]
 
     table_width = len(b.colnames)
 
@@ -233,9 +287,9 @@ def main(argv=None, ilog=None):
         if len(row) != table_width:
             log.error("Row %d has %r columns, %d expected", rownum, len(row), table_width)
             return 2
-        if page_type == 'RT':
+        if page_name == 'RT':
             row_time_t = time.mktime(time.strptime(row[0] + ' ' + row[1] + '00', "%m/%d/%Y %H%M%S"))
-        elif page_type == 'DAM':
+        elif page_name == 'DAM':
             hour = int(row[1])
             inc = 0
             if hour == 24:
@@ -244,20 +298,29 @@ def main(argv=None, ilog=None):
             hour = "%02d" % hour
             row_time_t = time.mktime(time.strptime(row[0] + ' ' + hour + '0000', "%m/%d/%Y %H%M%S")) + inc
         else:
-            log.error("Unknown page type %r", page_type)
+            log.error("Unknown page type %r", page_name)
             return 2
         for colpos in range(2, table_width):
             #  Convert from dollars/megawatt
             cents_per_kW = float(row[colpos]) * 100.0 / 1000.0
             spp_table[b.colnames[colpos]].append((row_time_t, cents_per_kW))
+
+    text = []
     for pos in reversed(range(0, args.last)):
         if pos < len(spp_table[args.zone]):
             selected_recent = spp_table[args.zone][-1 - pos]
-            print("%s: %s  %.2f  %.2f" % (
-                        args.zone,
-                        time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(selected_recent[0])),
-                        selected_recent[1],
-                        selected_recent[1] + args.delivery))
+            if args.zone_name:
+                text.append("%s: %s  %.2f  %.2f" % (
+                            args.zone,
+                            time.strftime(DATE_FORMAT, time.localtime(selected_recent[0])),
+                            selected_recent[1],
+                            selected_recent[1] + args.delivery))
+            else:
+                text.append("%s  %.2f  %.2f" % (
+                            time.strftime(DATE_FORMAT, time.localtime(selected_recent[0])),
+                            selected_recent[1],
+                            selected_recent[1] + args.delivery))
+    output(args, PAGE_TYPES[page_name], text)
 
 
 exit(main())
