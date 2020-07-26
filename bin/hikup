@@ -72,8 +72,9 @@ def parse_args(argv, log=None):
     p.add_argument('-e', '--log-stderr', action='store_true', help="Log to stderr, default is syslog")
     p.add_argument('-r', '--retain', action='store', type=int, metavar='days', default=def_retain,
                     help="Days to retain original images, use 0 for forever, default %r days" % def_retain)
-    p.add_argument('-R', '--reprocess', action='store', type=int, metavar='days', default=def_reprocess,
-                    help="Limit reprocessing to this many days on any change, use 0 for all, default %r days" % def_reprocess)
+    p.add_argument('-R', '--reprocess', action='store', metavar='days', default=def_reprocess,
+                    help="Limit reprocessing to this many days on any change, use 0 for all, "
+                         "or specify a directory default %r days" % def_reprocess)
     p.add_argument('-i', '--idle', action='store', type=int, metavar='secs', default=def_idle,
                     help="Delay processing until there have been no events for this period, default %r secs" % def_idle)
     p.add_argument('-d', '--destdir', action='store', metavar='path', default=def_destdir,
@@ -223,11 +224,12 @@ def process(daydir, args, set_latest=False):
     except Exception as e:
         log.error("Could not mark this run -- %s", e)
 
-    try:
-        start_t = os.path.getmtime(last_run)
-    except:
-        log.info("No previous run")
-        pass
+    if args.reprocess is None:
+        try:
+            start_t = os.path.getmtime(last_run)
+        except:
+            log.info("No previous run")
+            pass
 
     paths = []
     for fname in os.listdir(daydir):
@@ -245,10 +247,10 @@ def process(daydir, args, set_latest=False):
         log.info("No new files to process")
         return
 
-    log.info("Processong %d jpgs to mp4", len(paths))
+    log.info("Processing %d jpgs to mp4", len(paths))
     with open(list_file, 'w') as f:
         for path in sorted(paths):
-            f.write("file '%s'\n" % path)
+            f.write("file '%s'\n" % os.path.abspath(path))
 
     cmd = ['ffmpeg',
             '-loglevel', 'error',
@@ -316,10 +318,15 @@ def scan(cameradir, args):
                 shutil.rmtree(path)
             except Exception as e:
                 log.warning("Failed to remove expired path %r -- %s", path, e)
-    if args.reprocess and len(daydirs) > args.reprocess:
-        daydirs = daydirs[-args.reprocess:]
-        log.debug("Reprocess limited to %r: %r", args.reprocess, daydirs)
-    for path in daydirs:
+    if args.reprocess:
+        if os.path.isdir(args.reprocess):
+            procdirs = [args.reprocess]
+        else:
+            days = int(args.reprocess)
+            if days > 0 and len(daydirs) > days:
+                procdirs = daydirs[-days:]
+                log.debug("Reprocess limited to %r: %r", days, procdirs)
+    for path in procdirs:
         process(path, args, set_latest=(path == daydirs[-1]))
 
 
