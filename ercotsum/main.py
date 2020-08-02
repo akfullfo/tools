@@ -18,28 +18,26 @@
 #
 
 import os
-import sys
+import json
 import time
 import logging
 import logging.handlers
 import argparse
 
-from . import DEF_DELIVERY, DEF_ZONE, DAY_SECS, DATE_FORMAT, PageType, fetch, Browse
-
-PROGRAM = os.path.basename(os.path.splitext(sys.argv[0])[0])
+from . import DEF_BASE_DIR, DEF_DELIVERY, DEF_ZONE, DAY_SECS, DATE_FORMAT, RT_FILE, DAM_FILE, \
+              PageType, Browse, fetch, snapshot
 
 DEF_URL = 'http://www.ercot.com/content/cdr/html/real_time_spp'
 DEF_PAGE_TYPE = 'RT'
 DEF_LAST = 1
-DEF_BASE_DIR = os.path.join(os.sep, 'var', 'local', PROGRAM)
 DEF_TIMEOUT = 30
 
 
 #  These are the types of pages we can process.  The tuple elements are:
 #
 PAGE_TYPES = {
-    'RT': PageType('http://www.ercot.com/content/cdr/html/{yyyymmdd}_real_time_spp', 1, None, 'rt.txt'),
-    'DAM': PageType('http://www.ercot.com/content/cdr/html/{yyyymmdd}_dam_spp', 24, 14, 'dam.txt'),
+    'RT': PageType('http://www.ercot.com/content/cdr/html/{yyyymmdd}_real_time_spp', 1, None, RT_FILE),
+    'DAM': PageType('http://www.ercot.com/content/cdr/html/{yyyymmdd}_dam_spp', 24, 14, DAM_FILE),
 }
 
 COL0_NAME = 'Oper Day'
@@ -82,8 +80,9 @@ def parse_args(argv, log=None):
     pt = p.add_mutually_exclusive_group(required=True)
     pt.add_argument('-d', '--dam', action='store_true', help="Fetch day-ahead market")
     pt.add_argument('-r', '--real-time', action='store_true', help="Fetch real-time prices")
-    pt.add_argument('-D', '--date', action='store', metavar='YYYYMMDD', help="Fetch data for specified day. Default is today")
     pt.add_argument('-u', '--url', action='store', metavar='addr', default=DEF_URL, help="URL to access the pricing info")
+    pt.add_argument('-s', '--snapshot', action='store_true', help="Print a JSON snapshot of current data as used by web services")
+    p.add_argument('-D', '--date', action='store', metavar='YYYYMMDD', help="Fetch data for specified day. Default is today")
     p.add_argument('-b', '--base-dir', nargs='?', action='store', metavar='path', const=DEF_BASE_DIR,
                     help="Base directory for recording current and historical pricing.  With no path, uses %r" % DEF_BASE_DIR)
     p.add_argument('-v', '--verbose', action='store_true', help="Verbose logging")
@@ -140,7 +139,7 @@ def parse_args(argv, log=None):
             if lt.tm_hour >= page_type.cutover:
                 lt = time.localtime(now + DAY_SECS)
             args.date = time.strftime("%Y%m%d", lt)
-    else:
+    elif not args.snapshot:
         if args.base_dir:
             raise Exception("The --base-dir flag is only supported for standard URLs")
         if not args.date:
@@ -192,6 +191,10 @@ def output(args, page_type, text):
 def main(argv=None, ilog=None):
     global log
     args, log = parse_args(argv, log=ilog)
+
+    if args.snapshot:
+        print(json.dumps(snapshot(args.base_dir, log=log), sort_keys=True, indent=2))
+        return 0
 
     if args.file:
         with open(args.file, 'rt') as f:
