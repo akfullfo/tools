@@ -18,8 +18,6 @@
 
 import time
 import os
-import json
-from datetime import datetime
 import dateutil.parser
 from html.parser import HTMLParser
 import urllib.request
@@ -35,6 +33,9 @@ DEF_DELIVERY = 3.5448
 
 #  Limit before real-time data is considered stale
 AGE_LIMIT = 1200
+
+#  Number of days to include in the real-time averaging
+RT_AVG_DAYS = 5
 
 DAY_SECS = 24 * 60 * 60
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
@@ -103,11 +104,11 @@ class Browse(HTMLParser):
                 self.currow.append(data)
 
 
-def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, log=None):
+def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS, log=None):
     def get_dam(path):
         data = {}
         if os.path.exists(path):
-            with open(ercot_dam_prev, 'rt') as f:
+            with open(path, 'rt') as f:
                 for line in f:
                     ts, spp_cents, delivered_cents = line.strip().split()
                     spp_cents = float(spp_cents)
@@ -119,9 +120,36 @@ def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, log=None):
                     #  the algorithm tends to emphasize the peaks.
                     #
                     anticipate = spp_cents * spp_cents / 2 + delivery
+                    if anticipate < spp_cents + delivery:
+                        anticipate = spp_cents + delivery
 
                     data[ts] = (spp_cents, float(delivered_cents), anticipate)
         return data
+
+    def get_rt_average(base_dir, as_of, days):
+        """
+            Find the average real-time pricing for the last N days.
+        """
+        total = 0.0
+        count = 0
+
+        for day in range(days):
+            when = time.localtime(as_of - day * DAY_SECS)
+            path = os.path.join(base_dir, time.strftime("%Y%m%d", when), RT_FILE)
+            if os.path.exists(path):
+                with open(ercot_dam_prev, 'rt') as f:
+                    for line in f:
+                        ts, spp_cents, delivered_cents = line.strip().split()
+                        total += float(delivered_cents)
+                        count += 1
+            else:
+                break
+        if count > 0:
+            return total / count
+        else:
+            if log:
+                log.info("Average pricing not available")
+            return None
 
     now_t = time.time()
     now = time.localtime(now_t)
@@ -133,11 +161,32 @@ def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, log=None):
     dam_data = get_dam(ercot_dam_prev)
     dam_curr = get_dam(ercot_dam)
     if dam_data != dam_curr:
-        dam_data.update(dam_cur)
+        dam_data.update(dam_curr)
         if log:
             log.info("Tomorrow's DAM is in")
     else:
+        if log:
             log.info("Only have today's DAM")
+
+    #  The time stamp text of the most recent hour.
+    #
+    now_hr = time.strftime(DATE_FORMAT, time.struct_time(now[:4] + (0, 0) + now[6:]))
+
+    rt_avg = get_rt_average(base_dir, now_t, avg_days)
+
+    dam_current = None
+    dam_next_below = None
+
+    for dam_date in sorted(dam_data):
+        if dam_date >= now_hr:
+            dam_current = dam_data[dam_date]
+        if dam_current and not dam_next_below and dam_data[dam_date][1] < rt_avg:
+            dam_next_below = dam_date
+    if dam_next_below == now_hr:
+        low_cost = True
+        dam_next_below = None
+    else:
+        low_cost = False
 
     with open(ercot_rt, 'rt') as f:
         ts, spp_cents, delivered_cents = f.read().strip().split()
@@ -145,14 +194,28 @@ def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, log=None):
     ts = dateutil.parser.parse(ts)
     ts_t = ts.timestamp()
     age = now_t - ts_t
+    delivered_cents = float(delivered_cents)
 
     snapshot = {
             "as_of": ts.strftime(DATE_FORMAT),
             "as_of_t": ts_t,
-            "stale": (age > AGE_LIMIT),
-            "spp_cents": float(spp_cents),
-            "delivered_cents": float(delivered_cents),
-            "dam": dam_data,
+            "is_stale": (age > AGE_LIMIT),
+            "curr_spp_cents": float(spp_cents),
+            "curr_delivered_cents": delivered_cents,
+            "avg_delivered_cents": rt_avg,
         }
+    if dam_current:
+        anticipated = dam_current[2]
+        if anticipated < delivered_cents:
+            anticipated = delivered_cents
+        low_cost = (anticipated < rt_avg)
+        snapshot["next_spp_cents"] = dam_current[0]
+        snapshot["next_delivered_cents"] = dam_current[1]
+        snapshot["next_anticipated_cents"] = anticipated
+    if not low_cost and dam_next_below:
+        snapshot["next_low_cost"] = dateutil.parser.parse(dam_next_below).timestamp()
+        snapshot["next_low_cost_delivered"] = dam_data[dam_next_below][1]
+
+    snapshot["is_low_cost"] = low_cost
 
     return snapshot
