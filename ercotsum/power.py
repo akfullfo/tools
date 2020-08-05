@@ -21,6 +21,7 @@ import os
 import json
 import urllib
 import traceback
+import logging
 import ercotsum
 
 """
@@ -39,6 +40,12 @@ ERCOT_DAM = os.path.join(ERCOT_BASE, 'dam.txt')
 #  Estimated kWhs used by one drier run
 #
 DRIER_KWH = 5
+
+log_handler = logging.StreamHandler()
+log = logging.getLogger()
+log_handler.setFormatter(logging.Formatter(fmt="%(asctime)s %(levelname)s %(message)s"))
+log.addHandler(log_handler)
+log.setLevel(logging.INFO)
 
 
 def application(environ, start_response):
@@ -60,7 +67,7 @@ def application(environ, start_response):
         now = time.localtime(now_t)
         tim = time.strftime("%H:%M:%S", now)
         dat = time.strftime("%Y-%m-%d", now)
-        snap = ercotsum.snapshot()
+        snap = ercotsum.snapshot(log=log)
         if json_snapshot:
             if json_webpre:
                 resp = "<pre>\n" + json.dumps(snap, sort_keys=True, indent=2) + "\n</pre>"
@@ -74,10 +81,9 @@ def application(environ, start_response):
                 cost = ''
             as_of = snap.get('as_of', '')
             low_cost = snap.get('is_low_cost')
-            print("LOW: %r" % low_cost)
             if low_cost:
                 avg = snap.get('avg_delivered_cents', 0.0)
-                cheapest = "The average drier run cost is $%.2f" % drier_dollars(avg)
+                cheapest = "The average drier cost is $%.2f per load" % drier_dollars(avg)
             else:
                 low_when = snap.get('next_low_cost')
                 low_delivered = snap.get('next_low_cost_delivered')

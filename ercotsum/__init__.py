@@ -37,6 +37,11 @@ AGE_LIMIT = 1200
 #  Number of days to include in the real-time averaging
 RT_AVG_DAYS = 5
 
+#  Pricing is considered low-cost if it is less than
+#  the RT_AVG_DAYS average multiplied by this.
+#
+LOW_COST_MULTIPLIER = 1.3
+
 DAY_SECS = 24 * 60 * 60
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 
@@ -137,13 +142,11 @@ def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS,
             when = time.localtime(as_of - day * DAY_SECS)
             path = os.path.join(base_dir, time.strftime("%Y%m%d", when), RT_FILE)
             if os.path.exists(path):
-                with open(ercot_dam_prev, 'rt') as f:
+                with open(path, 'rt') as f:
                     for line in f:
                         ts, spp_cents, delivered_cents = line.strip().split()
                         total += float(delivered_cents)
                         count += 1
-            else:
-                break
         if count > 0:
             return total / count
         else:
@@ -163,16 +166,17 @@ def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS,
     if dam_data != dam_curr:
         dam_data.update(dam_curr)
         if log:
-            log.info("Tomorrow's DAM is in")
+            log.debug("Tomorrow's DAM is in")
     else:
         if log:
-            log.info("Only have today's DAM")
+            log.debug("Only have today's DAM")
 
     #  The time stamp text of the most recent hour.
     #
     now_hr = time.strftime(DATE_FORMAT, time.struct_time(now[:4] + (0, 0) + now[6:]))
 
     rt_avg = get_rt_average(base_dir, now_t, avg_days)
+    low_cost_level = rt_avg * LOW_COST_MULTIPLIER
 
     dam_current = None
     dam_next_below = None
@@ -180,7 +184,7 @@ def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS,
     for dam_date in sorted(dam_data):
         if dam_date >= now_hr:
             dam_current = dam_data[dam_date]
-        if dam_current and not dam_next_below and dam_data[dam_date][1] < rt_avg:
+        if dam_current and not dam_next_below and dam_data[dam_date][1] < low_cost_level:
             dam_next_below = dam_date
     if dam_next_below == now_hr:
         low_cost = True
@@ -208,7 +212,7 @@ def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS,
         anticipated = dam_current[2]
         if anticipated < delivered_cents:
             anticipated = delivered_cents
-        low_cost = (anticipated < rt_avg)
+        low_cost = (anticipated < low_cost_level)
         snapshot["next_spp_cents"] = dam_current[0]
         snapshot["next_delivered_cents"] = dam_current[1]
         snapshot["next_anticipated_cents"] = anticipated
