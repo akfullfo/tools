@@ -41,16 +41,49 @@ ERCOT_DAM = os.path.join(ERCOT_BASE, 'dam.txt')
 #
 DRIER_KWH = 5
 
+#  Backgound will be completely red when anticipated delivery is above this in cents.
+#
+COST_COLOR_MAX = 50
+
 log_handler = logging.StreamHandler()
 log = logging.getLogger()
 log_handler.setFormatter(logging.Formatter(fmt="%(asctime)s %(levelname)s %(message)s"))
 log.addHandler(log_handler)
 log.setLevel(logging.INFO)
 
+LL_ENVIRON = logging.DEBUG
+
+
+def has_small_display(environ):
+    """
+        This is probably hokey by today's standards
+    """
+    user_agent = environ.get('HTTP_USER_AGENT')
+    return (user_agent and 'android' in user_agent.lower())
+
 
 def application(environ, start_response):
     def drier_dollars(cost):
         return cost * DRIER_KWH / 100.0
+
+    def constrain(val, constraint=(0.0, 1.0)):
+        if val < constraint[0]:
+            val = constraint[0]
+        elif val > constraint[1]:
+            val = constraint[1]
+        return val
+
+    if log.isEnabledFor(LL_ENVIRON):
+        for tag, val in environ.items():
+            log.log(LL_ENVIRON, "ENV %s = %r", tag, val)
+
+    if has_small_display(environ):
+        fontsz = '24px'
+    else:
+        fontsz = '12px'
+    undercoat = 0x00
+    max_shade = 0xC0
+    bgcolor = '%02X%02X%02X' % (undercoat, undercoat, undercoat)
 
     try:
         #  Attempt to schedule the next page load on a refresh boundary.
@@ -74,9 +107,9 @@ def application(environ, start_response):
             else:
                 resp = json.dumps(snap)
         else:
-            cost = snap.get('next_anticipated_cents')
-            if cost:
-                cost = "Current drier cost: $%.2f per load" % drier_dollars(cost)
+            cost_cents = snap.get('next_anticipated_cents')
+            if cost_cents:
+                cost = "Current drier cost: $%.2f per load" % drier_dollars(cost_cents)
             else:
                 cost = ''
             as_of = snap.get('as_of', '')
@@ -92,24 +125,65 @@ def application(environ, start_response):
                 else:
                     low_when = '(unknown)'
                 cheapest = "The cost should drop to $%.2f after %s" % (drier_dollars(low_delivered), low_when)
+
+            if snap.get('is_stale'):
+                bgcolor = '606060'
+                stale = 'System problem, data is not current'
+            else:
+                stale = ''
+                color_range = max_shade - undercoat
+                red = green = 0
+                if low_cost:
+                    green = 1.0
+                elif cost_cents >= COST_COLOR_MAX:
+                    red = 1.0
+                else:
+                    ratio = (COST_COLOR_MAX - cost_cents) / (COST_COLOR_MAX - avg)
+                    red = constrain(1.0 if ratio < 0.5 else 1.0 - (2 * (ratio - 0.5)))
+                    green = constrain(1.0 if ratio > 0.5 else 2 * ratio)
+
+                red = undercoat + int(color_range * red)
+                green = undercoat + int(color_range * green)
+                blue = undercoat
+                bgcolor = '%02X%02X%02X' % (red, green, blue)
+
+            style = '''
+<style>
+body  {background-color: #%s; font-size: %s;}
+</style>''' % (bgcolor, fontsz)
+
             resp = '''
 <html>
 <head>
 <title>Bent Power</title>
 <meta http-equiv="refresh" content="{refresh}"/>
+{style}
 </head>
-<body  bgcolor="003366">
+<body>
 <center style="font-family:helvetica; font-size:300%; color:white">
 <h5>{date} {time}</h5>
 <pre style="font-family:Comic Sans MS; font-size:70%; color:white">
 {cost}
 </pre>
-<pre style="font-family:Comic Sans MS; font-size:50%; color:white">
+<pre style="font-family:Comic Sans MS; font-size:40%; color:white">
 {cheapest}
+(wholesale {wholesale:.2f} c/kWh, delivered {delivered:.2f} c/kWh)
+</pre>
+<pre style="font-family:Comic Sans MS; font-size:70%; color:red">
+{stale}
 </pre>
 </center>
 </body>
-</hmlt>'''.format(time=tim, date=dat, cost=cost, as_of=as_of, cheapest=cheapest, refresh=when)
+</hmlt>'''.format(style=style,
+                  time=tim,
+                  date=dat,
+                  cost=cost,
+                  as_of=as_of,
+                  cheapest=cheapest,
+                  wholesale=snap.get('curr_spp_cents'),
+                  delivered=snap.get('curr_delivered_cents'),
+                  stale=stale,
+                  refresh=when)
 
         start_response('200 OK', [('Content-Type', 'text/html')])
         return [resp.encode('utf-8')]
