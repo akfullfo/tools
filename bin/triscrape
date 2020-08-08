@@ -26,6 +26,7 @@ import logging.handlers
 import argparse
 from html.parser import HTMLParser
 import urllib.request
+import urllib.parse
 from http.client import RemoteDisconnected
 from socket import timeout as SocketTimeout
 
@@ -35,6 +36,7 @@ DEF_WORKDIR = '/tmp/mov'
 DEF_DESTDIR = '/cameras/mov'
 DEF_SECRETS = '/cameras/.credentials'
 DEF_TIMEOUT = 45
+DEF_TIME_THRESHOLD = 30
 
 #  Maximum number of pages to pull browsing camera storage.
 #  The camera has a limit of 10,000 files, so this should
@@ -70,6 +72,12 @@ def parse_args(argv, log=None):
                     help="Hostname or IP to use to contact the camera.  Default is to use the camera name and port 80")
     p.add_argument('-C', '--credentials', action='store', default=DEF_SECRETS,
                     help="File to load access credentials from in camera=login:secret format")
+    p.add_argument('--check-time', action='store_true',
+                    help="Check the time setting and reset if necessary, then exit"
+                         "Trivision cameras have a bug where SNTP does not set the time correctly. "
+                         "This is a pretty ugly work-around.  We need good timestamps.")
+    p.add_argument('--time-threshold', action='store', type=float, default=DEF_TIME_THRESHOLD,
+                    help="When checking the time, apply a correction if it is off by more than this.")
     p.add_argument('-1', '--once', action='store_true', help="Exit after initial processing")
     p.add_argument('-n', '--dryrun', action='store_true',
                     help="List the files that would be downloaded without actually downloading them")
@@ -143,13 +151,13 @@ class Camera(object):
         opener = urllib.request.build_opener(handler)
         urllib.request.install_opener(opener)
 
-    def req(self, path, **query):
+    def req(self, path, method=None, data=None, **query):
         url = self.top_level_url
         if path:
             url += path
         if query:
             url += '?' + urllib.parse.urlencode(query)
-        return urllib.request.Request(url)
+        return urllib.request.Request(url, method=method, data=data)
 
 
 class Pages(Camera):
@@ -185,6 +193,96 @@ class Browse(HTMLParser):
 
     def __call__(self):
         return self._files
+
+
+class Post(Camera):
+    def __call__(self, path, data, **query):
+        with urllib.request.urlopen(self.req(path, method='POST', data=data, **query), timeout=self.timeout) as f:
+            return f.read().decode('utf-8')
+
+
+class GetTime(HTMLParser):
+    _re_device_time = re.compile(r'^device_time\s*=\s*(\d+)')
+    _script = None
+    _in_script = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'script':
+            self._in_script = True
+
+    def handle_endtag(self, tag):
+        if tag == 'script':
+            self._in_script = False
+
+    def handle_data(self, data):
+        if self._in_script and self._script is None:
+            self._script = data
+
+    def __call__(self):
+        """
+            Once the javascript has been parsed out of the html,
+            isolate the assignment that gives us a time_t from the
+            clock.
+        """
+        if self._script is None:
+            return None
+        in_init = False
+        for line in self._script.splitlines():
+            line = line.strip()
+            if line.startswith('function init()'):
+                in_init = True
+                continue
+            if in_init:
+                m = self._re_device_time.match(line)
+                if m:
+                    return int(m.group(1))
+
+
+def check_time(camera, credentials, args):
+
+    def get_delta(html):
+        get_time = GetTime()
+        get_time.feed(clock('en/clock.asp'))
+        camera_t = get_time()
+        return int(abs(get_time() - time.time()))
+
+    clock = Pages(camera, credentials, args)
+    time_delta = get_delta(clock('en/clock.asp'))
+
+    if time_delta < args.time_threshold:
+        log.info("No significant time difference on %s", camera)
+        return 0
+
+    if args.dryrun:
+        log.warning("Significant time difference of %r secs on %s -- update disabled for dryrun", time_delta, camera)
+        return 1
+    else:
+        log.warning("Attempting time reset on %s", camera)
+
+    now_t = time.time()
+    now = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(now_t))
+
+    data = {
+        "UTCTIME": str(now_t),
+        "DEVICEDATETIME": now,
+        "SYSTEMDATETIME": now,
+        "TIMEZONE": "620",
+        "DAYLIGHTTIME": "enable",
+        "FORMAT": "0",
+        "SNTP": "enable",
+        "NTPSERVER": "tick.fullford.com",
+    }
+    udata = urllib.parse.urlencode(data).encode('utf-8')
+    set_time = Post(camera, credentials, args)
+    ans = set_time('form/clockApply', udata, lang="en")
+
+    time_delta = get_delta(ans)
+    if time_delta < args.time_threshold:
+        log.info("Time sucessfully updated on %s", camera)
+        return 0
+    else:
+        log.warning("Time delta excessive after update on %s", camera)
+        return 2
 
 
 _re_dt_path = re.compile(r'^\w*_(\d\d\d\d)-(\d\d)-(\d\d)_.*\.\w+$')
@@ -316,14 +414,6 @@ def main(argv=None, ilog=None):
     args, log = parse_args(argv, log=ilog)
 
     camera = args.name[0]
-    camerabase = os.path.join(args.destdir, camera)
-    if not os.path.isdir(camerabase):
-        log.error("%s is not a directory", camerabase)
-        exit(2)
-
-    log.info("Recordings under %r", camerabase)
-
-    set_signals(camerabase)
 
     credentials = load_credentials(args)
     if credentials is None:
@@ -332,6 +422,19 @@ def main(argv=None, ilog=None):
     if camera not in credentials:
         log.error("%s: No credentials recorded", camera)
         exit(4)
+
+    if args.check_time:
+        check_time(camera, credentials[camera], args)
+        exit(0)
+
+    camerabase = os.path.join(args.destdir, camera)
+    if not os.path.isdir(camerabase):
+        log.error("%s is not a directory", camerabase)
+        exit(2)
+
+    log.info("Recordings under %r", camerabase)
+
+    set_signals(camerabase)
 
     exc_count = 0
     while True:
