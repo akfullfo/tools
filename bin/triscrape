@@ -243,7 +243,6 @@ def check_time(camera, credentials, args):
     def get_delta(html):
         get_time = GetTime()
         get_time.feed(clock('en/clock.asp'))
-        camera_t = get_time()
         return int(abs(get_time() - time.time()))
 
     clock = Pages(camera, credentials, args)
