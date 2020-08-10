@@ -64,8 +64,8 @@ def has_small_display(environ):
 
 
 def application(environ, start_response):
-    def drier_dollars(cost):
-        return cost * DRIER_KWH / 100.0
+    def drier_dollars(cost, generation=0.0):
+        return cost * (DRIER_KWH - generation) / 100.0
 
     def constrain(val, constraint=(0.0, 1.0)):
         if val < constraint[0]:
@@ -121,8 +121,10 @@ def application(environ, start_response):
             else:
                 current_use = 'Current load %.1f kW ($%.2f/hour)' % (demand_5m, demand_5m * demand_price / 100.0)
 
+            generation = -demand_5m if demand_5m < 0.0 else 0.0
+
             if cost_cents:
-                cost = "Current drier cost: $%.2f per load" % drier_dollars(cost_cents)
+                cost = "Current drier cost: $%.2f per load" % drier_dollars(cost_cents, generation=generation)
             else:
                 cost = ''
             as_of = snap.get('as_of', '')
