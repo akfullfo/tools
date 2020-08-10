@@ -108,6 +108,13 @@ def application(environ, start_response):
                 resp = json.dumps(snap)
         else:
             cost_cents = snap.get('next_anticipated_cents')
+            demand_1m = snap.get('demand_1m')
+            delivered = snap.get('curr_delivered_cents')
+            if demand_1m is None or delivered is None:
+                current_use = ''
+            else:
+                current_use = 'Current load %.1f kW ($%.2f/hour)' % (demand_1m, demand_1m * delivered / 100.0)
+
             if cost_cents:
                 cost = "Current drier cost: $%.2f per load" % drier_dollars(cost_cents)
             else:
@@ -168,6 +175,7 @@ body  {background-color: #%s; font-size: %s;}
 <pre style="font-family:Comic Sans MS; font-size:40%; color:white">
 {cheapest}
 (wholesale {wholesale:.2f} c/kWh, delivered {delivered:.2f} c/kWh)
+{current_use}
 </pre>
 <pre style="font-family:Comic Sans MS; font-size:70%; color:red">
 {stale}
@@ -181,7 +189,8 @@ body  {background-color: #%s; font-size: %s;}
                   as_of=as_of,
                   cheapest=cheapest,
                   wholesale=snap.get('curr_spp_cents'),
-                  delivered=snap.get('curr_delivered_cents'),
+                  delivered=delivered,
+                  current_use=current_use,
                   stale=stale,
                   refresh=when)
 
