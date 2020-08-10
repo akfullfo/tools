@@ -21,6 +21,7 @@ import os
 import json
 import urllib
 import traceback
+import random
 import logging
 import ercotsum
 
@@ -30,7 +31,7 @@ import ercotsum
 """
 
 REFRESH = 60
-DELTA = 10
+DELTA = 15
 AGE_LIMIT = 1200
 
 ERCOT_BASE = '/var/local/ercotsum'
@@ -93,7 +94,7 @@ def application(environ, start_response):
         json_webpre = ('style' in query_args and 'pre' in query_args['style'])
 
         now_t = time.time()
-        when = REFRESH - (int(now_t) % REFRESH) + DELTA
+        when = REFRESH - (int(now_t) % REFRESH) + int(DELTA * random.random())
         if when <= 0:
             when = REFRESH + DELTA
 
@@ -108,12 +109,17 @@ def application(environ, start_response):
                 resp = json.dumps(snap)
         else:
             cost_cents = snap.get('next_anticipated_cents')
-            demand_1m = snap.get('demand_1m')
-            delivered = snap.get('curr_delivered_cents')
-            if demand_1m is None or delivered is None:
+            demand_5m = snap.get('demand_5m')
+            demand_price = snap.get('curr_delivered_cents')
+            if demand_5m < 0.0:
+                #  We only get paid the wholesale energy price when we
+                #  are generating.
+                #
+                demand_price = snap.get('curr_spp_cents')
+            if demand_5m is None or demand_price is None:
                 current_use = ''
             else:
-                current_use = 'Current load %.1f kW ($%.2f/hour)' % (demand_1m, demand_1m * delivered / 100.0)
+                current_use = 'Current load %.1f kW ($%.2f/hour)' % (demand_5m, demand_5m * demand_price / 100.0)
 
             if cost_cents:
                 cost = "Current drier cost: $%.2f per load" % drier_dollars(cost_cents)
@@ -189,7 +195,7 @@ body  {background-color: #%s; font-size: %s;}
                   as_of=as_of,
                   cheapest=cheapest,
                   wholesale=snap.get('curr_spp_cents'),
-                  delivered=delivered,
+                  delivered=snap.get('curr_delivered_cents'),
                   current_use=current_use,
                   stale=stale,
                   refresh=when)
