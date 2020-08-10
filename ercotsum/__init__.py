@@ -25,6 +25,9 @@ import urllib.request
 #  Default location of current and historical data
 DEF_BASE_DIR = '/var/local/ercotsum'
 
+#  Default location of current and historical data
+DEF_DEMAND_DIR = '/var/local/rainbarrel'
+
 #  ERCOT load zone for North Central Texas
 DEF_ZONE = 'LZ_NORTH'
 
@@ -109,7 +112,7 @@ class Browse(HTMLParser):
                 self.currow.append(data)
 
 
-def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS, log=None):
+def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS, log=None):
     def get_dam(path):
         data = {}
         if os.path.exists(path):
@@ -148,11 +151,73 @@ def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS,
                         total += float(delivered_cents)
                         count += 1
         if count > 0:
-            return total / count
+            return round(total / count, 4)
         else:
             if log:
                 log.info("Average pricing not available")
             return None
+
+    def demand_avg(demand, limit):
+        count = 0
+        total = 0.0
+        for ts, kw in demand:
+            if ts >= limit:
+                count += 1
+                total += kw
+            else:
+                break
+        if count > 0:
+            avg = round(total / count, 4)
+        else:
+            avg = None
+        if log:
+            log.debug("Found %d items, total %.1f, avg %.1f", count, total, avg)
+        return avg
+
+    def get_demand_load(base_dir, as_of):
+        """
+            Find the average demand load in kW.  The result is a
+            tuple (1m, 5m, 15m) a la Unix loadavg.
+
+            This data comes via rainbarrel monitoring of the
+            Rainforest Eagle zigbee gateway.
+
+            This loads data for the last two days so that at the
+            midnight transition there will be at least one day
+            of data available.
+        """
+
+        #  Only require this many lines to do the averging.
+        #  This avoids doing timestamp calculations on large
+        #  numbers of samples.  The date parsing is very slow.
+        #
+        need_lines = int(900 / 30 + 100)
+
+        demand_lines = []
+        for day in range(1, -1, -1):
+            when = time.localtime(as_of - day * DAY_SECS)
+            path = os.path.join(base_dir, time.strftime("%Y-%m-%d.demand", when))
+            if os.path.exists(path):
+                with open(path, 'rt') as f:
+                    for line in f:
+                        demand_lines.append(line.strip())
+
+        demand = []
+        for line in demand_lines[-need_lines:]:
+            try:
+                iso_time, demand_kw = line.split()
+                ts_t = dateutil.parser.parse(iso_time).timestamp()
+                demand.append((ts_t, float(demand_kw)))
+            except Exception as e:
+                if log:
+                    log.warning("Ingnoring demand entry %r -- %s", line, e)
+
+        demand.sort(reverse=True)
+        if demand[0][0] < as_of - AGE_LIMIT:
+            if log:
+                log.warning("Stale demand data detected, most recent is %.1f hours old", as_of - demand[0][0])
+
+        return (demand_avg(demand, as_of - 60), demand_avg(demand, as_of - 300), demand_avg(demand, as_of - 900))
 
     now_t = time.time()
     now = time.localtime(now_t)
@@ -177,6 +242,8 @@ def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS,
 
     rt_avg = get_rt_average(base_dir, now_t, avg_days)
     low_cost_level = rt_avg * LOW_COST_MULTIPLIER
+
+    demand = get_demand_load(demand_dir, now_t)
 
     dam_current = None
     dam_next_below = None
@@ -207,6 +274,9 @@ def snapshot(base_dir=DEF_BASE_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS,
             "curr_spp_cents": float(spp_cents),
             "curr_delivered_cents": delivered_cents,
             "avg_delivered_cents": rt_avg,
+            "demand_1m": demand[0],
+            "demand_5m": demand[1],
+            "demand_15m": demand[2],
         }
     if dam_current:
         anticipated = dam_current[2]
