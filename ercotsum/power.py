@@ -102,7 +102,7 @@ def application(environ, start_response):
             with open(temp, 'wt') as f:
                 json.dump(data, f, sort_keys=True, indent=2)
             os.rename(temp, CACHE_FILE)
-            log.info("Cache file %s update", CACHE_FILE)
+            log.debug("Cache file %s update", CACHE_FILE)
         except Exception as e:
             log.warning("Cache save failed -- %s", e)
 
