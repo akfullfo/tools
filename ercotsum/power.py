@@ -32,11 +32,15 @@ import ercotsum
 
 REFRESH = 60
 DELTA = 15
-AGE_LIMIT = 1200
+AGE_LIMIT = 1860
 
 ERCOT_BASE = '/var/local/ercotsum'
 ERCOT_RT = os.path.join(ERCOT_BASE, 'rt.txt')
 ERCOT_DAM = os.path.join(ERCOT_BASE, 'dam.txt')
+
+CACHE_BASE = '/var/local/www-data'
+CACHE_FILE = os.path.join(CACHE_BASE, os.path.basename(ERCOT_BASE) + '.json')
+CACHE_AGE = DELTA * 2
 
 #  Estimated kWhs used by one drier run
 #
@@ -64,6 +68,7 @@ def has_small_display(environ):
 
 
 def application(environ, start_response):
+
     def drier_dollars(cost, generation=0.0):
         return cost * (DRIER_KWH - generation) / 100.0
 
@@ -73,6 +78,33 @@ def application(environ, start_response):
         elif val > constraint[1]:
             val = constraint[1]
         return val
+
+    def load_cache_snapshot():
+        if not os.path.exists(CACHE_FILE):
+            log.info("No cache file %s", CACHE_FILE)
+            return None
+        try:
+            if os.path.getmtime(CACHE_FILE) + CACHE_AGE < time.time():
+                log.debug("Cache file %s aged out", CACHE_FILE)
+                return None
+
+            with open(CACHE_FILE, 'rt') as f:
+                data = json.load(f)
+                log.debug("Snapshot is from %s", CACHE_FILE)
+                return data
+        except Exception as e:
+            log.warning("Cache file %r load failed -- %s", CACHE_FILE, e)
+            return None
+
+    def save_cache_snapshot(data):
+        temp = CACHE_FILE + '.tmp'
+        try:
+            with open(temp, 'wt') as f:
+                json.dump(data, f, sort_keys=True, indent=2)
+            os.rename(temp, CACHE_FILE)
+            log.info("Cache file %s update", CACHE_FILE)
+        except Exception as e:
+            log.warning("Cache save failed -- %s", e)
 
     if log.isEnabledFor(LL_ENVIRON):
         for tag, val in environ.items():
@@ -101,7 +133,12 @@ def application(environ, start_response):
         now = time.localtime(now_t)
         tim = time.strftime("%H:%M:%S", now)
         dat = time.strftime("%Y-%m-%d", now)
-        snap = ercotsum.snapshot(log=log)
+        snap = load_cache_snapshot()
+        if snap is None:
+            snap = ercotsum.snapshot(log=log)
+            log.debug("Snapshot is from ercotsum")
+            save_cache_snapshot(snap)
+
         if json_snapshot:
             if json_webpre:
                 resp = "<pre>\n" + json.dumps(snap, sort_keys=True, indent=2) + "\n</pre>"
@@ -127,10 +164,10 @@ def application(environ, start_response):
                 cost = "Current drier cost: $%.2f per load" % drier_dollars(cost_cents, generation=generation)
             else:
                 cost = ''
+            avg = snap.get('avg_delivered_cents', 0.0)
             as_of = snap.get('as_of', '')
             low_cost = snap.get('is_low_cost')
             if low_cost:
-                avg = snap.get('avg_delivered_cents', 0.0)
                 cheapest = "The average drier cost is $%.2f per load" % drier_dollars(avg)
             else:
                 low_when = snap.get('next_low_cost')
@@ -147,7 +184,7 @@ def application(environ, start_response):
             else:
                 stale = ''
                 color_range = max_shade - undercoat
-                red = green = 0
+                red = green = 0.0
                 if low_cost:
                     green = 1.0
                 elif cost_cents >= COST_COLOR_MAX:
@@ -157,6 +194,7 @@ def application(environ, start_response):
                     red = constrain(1.0 if ratio < 0.5 else 1.0 - (2 * (ratio - 0.5)))
                     green = constrain(1.0 if ratio > 0.5 else 2 * ratio)
 
+                log.info("Cost ratio: Green %.3f, RED %.3f", green, red)
                 red = undercoat + int(color_range * red)
                 green = undercoat + int(color_range * green)
                 blue = undercoat
