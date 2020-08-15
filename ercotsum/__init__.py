@@ -18,6 +18,7 @@
 
 import time
 import os
+import datetime
 import dateutil.parser
 from html.parser import HTMLParser
 import urllib.request
@@ -34,8 +35,11 @@ DEF_ZONE = 'LZ_NORTH'
 #  Oncor per-kWh delivery charge for North Central Texas as of 2020-8-1
 DEF_DELIVERY = 3.5448
 
+#  ERCOT per-kWh price cap as of 2020-8-1
+ERCOT_PRICE_CAP = 900
+
 #  Limit before real-time data is considered stale
-AGE_LIMIT = 1200
+AGE_LIMIT = 2000
 
 #  Number of days to include in the real-time averaging
 RT_AVG_DAYS = 5
@@ -112,7 +116,7 @@ class Browse(HTMLParser):
                 self.currow.append(data)
 
 
-def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS, log=None):
+def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS, dam=False, log=None):
     def get_dam(path):
         data = {}
         if os.path.exists(path):
@@ -127,9 +131,12 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
                     #  our price calculations to be more of a worst-case value, so
                     #  the algorithm tends to emphasize the peaks.
                     #
-                    anticipate = spp_cents * spp_cents / 2 + delivery
-                    if anticipate < spp_cents + delivery:
-                        anticipate = spp_cents + delivery
+                    anticipate = spp_cents * spp_cents / 2
+                    if anticipate > ERCOT_PRICE_CAP:
+                        anticipate = ERCOT_PRICE_CAP
+                    if anticipate < spp_cents:
+                        anticipate = spp_cents
+                    anticipate += delivery
 
                     data[ts] = (spp_cents, float(delivered_cents), anticipate)
         return data
@@ -220,11 +227,11 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
         return (demand_avg(demand, as_of - 60), demand_avg(demand, as_of - 300), demand_avg(demand, as_of - 900))
 
     now_t = time.time()
-    now = time.localtime(now_t)
+    now = datetime.datetime.now(tz=dateutil.tz.tzlocal())
 
     ercot_rt = os.path.join(base_dir, RT_FILE)
     ercot_dam = os.path.join(base_dir, DAM_FILE)
-    ercot_dam_prev = os.path.join(base_dir, time.strftime("%Y%m%d", now), DAM_FILE)
+    ercot_dam_prev = os.path.join(base_dir, now.strftime("%Y%m%d"), DAM_FILE)
 
     dam_data = get_dam(ercot_dam_prev)
     dam_curr = get_dam(ercot_dam)
@@ -238,7 +245,7 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
 
     #  The time stamp text of the most recent hour.
     #
-    now_hr = time.strftime(DATE_FORMAT, time.struct_time(now[:4] + (0, 0) + now[6:]))
+    now_hr = now.replace(minute=0, second=0, microsecond=0).strftime(DATE_FORMAT)
 
     rt_avg = get_rt_average(base_dir, now_t, avg_days)
     low_cost_level = rt_avg * LOW_COST_MULTIPLIER
@@ -247,12 +254,20 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
 
     dam_current = None
     dam_next_below = None
+    dam_peak_next = None
+    dam_peak = 0.0
+    peak_limit = time.strftime(DATE_FORMAT, time.localtime(now_t + 22 * 3600))
 
     for dam_date in sorted(dam_data):
         if dam_date >= now_hr:
-            dam_current = dam_data[dam_date]
-        if dam_current and not dam_next_below and dam_data[dam_date][1] < low_cost_level:
-            dam_next_below = dam_date
+            if not dam_current:
+                dam_current = dam_data[dam_date]
+            if dam_date <= peak_limit and dam_peak < dam_data[dam_date][1] and dam_data[dam_date][1] > low_cost_level:
+                dam_peak = dam_data[dam_date][1]
+                dam_peak_next = dam_date
+            if not dam_next_below and dam_current and dam_date > now_hr and dam_data[dam_date][1] < low_cost_level:
+                dam_next_below = dam_date
+
     if dam_next_below == now_hr:
         low_cost = True
         dam_next_below = None
@@ -264,7 +279,11 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
 
     ts = dateutil.parser.parse(ts)
     ts_t = ts.timestamp()
+    mtime_t = os.path.getmtime(ercot_rt)
     age = now_t - ts_t
+    if log:
+        log.info("Loaded %r: ts %.0f, mtime %.0f, age %.0f, limit %.0f", ercot_rt, ts_t, mtime_t, age, AGE_LIMIT)
+
     delivered_cents = float(delivered_cents)
 
     snapshot = {
@@ -289,6 +308,12 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
     if not low_cost and dam_next_below:
         snapshot["next_low_cost"] = dateutil.parser.parse(dam_next_below).timestamp()
         snapshot["next_low_cost_delivered"] = dam_data[dam_next_below][1]
+    if dam_peak_next:
+        snapshot["dam_peak_next"] = dateutil.parser.parse(dam_peak_next).timestamp()
+        snapshot["dam_peak_delivered"] = dam_data[dam_peak_next][1]
+
+    if dam:
+        snapshot["dam"] = dam_data
 
     snapshot["is_low_cost"] = low_cost
 

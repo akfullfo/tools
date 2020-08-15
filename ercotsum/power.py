@@ -18,6 +18,7 @@
 
 import time
 import os
+import re
 import json
 import urllib
 import traceback
@@ -57,6 +58,21 @@ log.addHandler(log_handler)
 log.setLevel(logging.INFO)
 
 LL_ENVIRON = logging.DEBUG
+
+RE_TRUE_YES_ON = re.compile(r'^([ty]|on)', re.IGNORECASE)
+
+
+def truthy(value, none=False):
+    if none and value is None:
+        return None
+    if value is None or value == '':
+        return False
+    value = str(value)
+    try:
+        return (int(value) != 0)
+    except:
+        pass
+    return (RE_TRUE_YES_ON.match(value) is not None)
 
 
 def has_small_display(environ):
@@ -122,8 +138,9 @@ def application(environ, start_response):
         #  Attempt to schedule the next page load on a refresh boundary.
         #
         query_args = urllib.parse.parse_qs(environ.get('QUERY_STRING', ''))
-        json_snapshot = ('fmt' in query_args and 'json' in query_args['fmt'])
         json_webpre = ('style' in query_args and 'pre' in query_args['style'])
+        json_snapshot = ('fmt' in query_args and 'json' in query_args['fmt'])
+        json_dam = truthy(query_args.get('dam', [0])[0])
 
         now_t = time.time()
         when = REFRESH - (int(now_t) % REFRESH) + int(DELTA * random.random())
@@ -133,9 +150,14 @@ def application(environ, start_response):
         now = time.localtime(now_t)
         tim = time.strftime("%H:%M:%S", now)
         dat = time.strftime("%Y-%m-%d", now)
-        snap = load_cache_snapshot()
+
+        if json_dam:
+            snap = None
+        else:
+            snap = load_cache_snapshot()
+
         if snap is None:
-            snap = ercotsum.snapshot(log=log)
+            snap = ercotsum.snapshot(dam=json_dam, log=log)
             log.debug("Snapshot is from ercotsum")
             save_cache_snapshot(snap)
 
@@ -164,9 +186,11 @@ def application(environ, start_response):
                 cost = "Current drier cost: $%.2f per load" % drier_dollars(cost_cents, generation=generation)
             else:
                 cost = ''
-            avg = snap.get('avg_delivered_cents', 0.0)
+            avg = snap.get('avg_delivered_cents', 1.0)
             as_of = snap.get('as_of', '')
             low_cost = snap.get('is_low_cost')
+            peak_time = snap.get('dam_peak_next')
+            peak_cents = snap.get('dam_peak_delivered')
             if low_cost:
                 cheapest = "The average drier cost is $%.2f per load" % drier_dollars(avg)
             else:
@@ -178,11 +202,14 @@ def application(environ, start_response):
                     low_when = '(unknown)'
                 cheapest = "The cost should drop to $%.2f after %s" % (drier_dollars(low_delivered), low_when)
 
+            alerts = []
+            if peak_time:
+                alerts.append("Peak $%.2f/kWh at %s (%.0f%% above avg)" %
+                                (peak_cents / 100.0, time.strftime("%I:%M %p", time.localtime(peak_time)), peak_cents * 100 / avg))
             if snap.get('is_stale'):
                 bgcolor = '606060'
-                stale = 'System problem, data is not current'
+                alerts.append('System problem, data is not current')
             else:
-                stale = ''
                 color_range = max_shade - undercoat
                 red = green = 0.0
                 if low_cost:
@@ -194,7 +221,7 @@ def application(environ, start_response):
                     red = constrain(1.0 if ratio < 0.5 else 1.0 - (2 * (ratio - 0.5)))
                     green = constrain(1.0 if ratio > 0.5 else 2 * ratio)
 
-                log.info("Cost ratio: Green %.3f, RED %.3f", green, red)
+                log.debug("Cost ratio: Green %.3f, RED %.3f", green, red)
                 red = undercoat + int(color_range * red)
                 green = undercoat + int(color_range * green)
                 blue = undercoat
@@ -214,7 +241,10 @@ body  {background-color: #%s; font-size: %s;}
 </head>
 <body>
 <center style="font-family:helvetica; font-size:300%; color:white">
-<h5>{date} {time}</h5>
+{date} {time}
+<pre style="font-family:Comic Sans MS; font-size:50%; color:red; background-color: white">
+{alerts}
+</pre>
 <pre style="font-family:Comic Sans MS; font-size:70%; color:white">
 {cost}
 </pre>
@@ -222,9 +252,6 @@ body  {background-color: #%s; font-size: %s;}
 {cheapest}
 (wholesale {wholesale:.2f} c/kWh, delivered {delivered:.2f} c/kWh)
 {current_use}
-</pre>
-<pre style="font-family:Comic Sans MS; font-size:70%; color:red">
-{stale}
 </pre>
 </center>
 </body>
@@ -237,7 +264,7 @@ body  {background-color: #%s; font-size: %s;}
                   wholesale=snap.get('curr_spp_cents'),
                   delivered=snap.get('curr_delivered_cents'),
                   current_use=current_use,
-                  stale=stale,
+                  alerts='</br>'.join(alerts),
                   refresh=when)
 
         start_response('200 OK', [('Content-Type', 'text/html')])
