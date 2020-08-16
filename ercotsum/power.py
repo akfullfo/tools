@@ -24,6 +24,9 @@ import urllib
 import traceback
 import random
 import logging
+import ipaddress
+import crypt
+import base64
 import ercotsum
 
 """
@@ -43,6 +46,8 @@ CACHE_BASE = '/var/local/www-data'
 CACHE_FILE = os.path.join(CACHE_BASE, os.path.basename(ERCOT_BASE) + '.json')
 CACHE_AGE = DELTA * 2
 
+HTTP_CACHE_CONTROL = [('Cache-Control', 'no-cache, no-store, must-revalidate')]
+
 #  Estimated kWhs used by one drier run
 #
 DRIER_KWH = 5
@@ -60,6 +65,11 @@ log.setLevel(logging.INFO)
 LL_ENVIRON = logging.DEBUG
 
 RE_TRUE_YES_ON = re.compile(r'^([ty]|on)', re.IGNORECASE)
+RE_BASIC_AUTH = re.compile(r'^\s*Basic\s+(\S+)\s*$')
+
+ALLOWED_NETWORK = '192.168.38.0/24'
+HTPASSWD_FILE = '/var/www/mmm/etc/passwd'
+IP_ALLOWED_NET = ipaddress.ip_interface(ALLOWED_NETWORK).network
 
 
 def truthy(value, none=False):
@@ -84,6 +94,41 @@ def has_small_display(environ):
 
 
 def application(environ, start_response):
+
+    def authorize():
+        src_ip = environ.get('REMOTE_ADDR')
+        if src_ip:
+            a = ipaddress.ip_address(src_ip)
+            o_net = ipaddress.ip_network((a, IP_ALLOWED_NET._prefixlen), strict=False)
+            if IP_ALLOWED_NET.compare_networks(o_net) == 0:
+                return True
+        else:
+            log.warning("No remote address available, which is weird")
+
+        auth = environ.get('HTTP_AUTHORIZATION')
+        if auth is None:
+            return None
+
+        try:
+            m = RE_BASIC_AUTH.match(auth)
+            if m:
+                user, password = base64.b64decode(m.group(1)).decode('utf-8').split(':')
+            else:
+                log.error("Invalid authenication string starting %r", auth[:6])
+                return False
+
+            with open(HTPASSWD_FILE, 'rt') as f:
+                for line in f:
+                    if ':' in line:
+                        pwuser, pwhash = line.strip().split(':')
+                        if user == pwuser:
+                            genhash = crypt.crypt(password, pwhash)
+                            log.info("User %r password %svalidated", user, '' if pwhash == genhash else 'NOT ')
+                            return pwhash == genhash
+            log.warning("Unknown user %r", user)
+        except Exception as e:
+            log.error("Authentication failed -- %s", e)
+        return False
 
     def drier_dollars(cost, generation=0.0):
         return cost * (DRIER_KWH - generation) / 100.0
@@ -123,18 +168,28 @@ def application(environ, start_response):
             log.warning("Cache save failed -- %s", e)
 
     if log.isEnabledFor(LL_ENVIRON):
-        for tag, val in environ.items():
+        for tag, val in sorted(environ.items()):
             log.log(LL_ENVIRON, "ENV %s = %r", tag, val)
 
-    if has_small_display(environ):
-        fontsz = '24px'
-    else:
-        fontsz = '12px'
-    undercoat = 0x00
-    max_shade = 0xC0
-    bgcolor = '%02X%02X%02X' % (undercoat, undercoat, undercoat)
+    content_type = 'text/html'
 
     try:
+        auth = authorize()
+        if not auth:
+            start_response('401 Unauthorized', [
+                                ('Content-Type', 'text/plain'),
+                                ('WWW-Authenticate', 'Basic realm="Power"'),
+                            ] + HTTP_CACHE_CONTROL)
+            return ['Unauthorized'.encode('utf-8')]
+
+        if has_small_display(environ):
+            fontsz = '24px'
+        else:
+            fontsz = '12px'
+        undercoat = 0x00
+        max_shade = 0xC0
+        bgcolor = '%02X%02X%02X' % (undercoat, undercoat, undercoat)
+
         #  Attempt to schedule the next page load on a refresh boundary.
         #
         query_args = urllib.parse.parse_qs(environ.get('QUERY_STRING', ''))
@@ -163,24 +218,25 @@ def application(environ, start_response):
 
         if json_snapshot:
             if json_webpre:
-                resp = "<pre>\n" + json.dumps(snap, sort_keys=True, indent=2) + "\n</pre>"
+                resp = "<html><body><pre>\n" + json.dumps(snap, sort_keys=True, indent=2) + "\n</pre></body></html>\n"
             else:
                 resp = json.dumps(snap)
+                content_type = 'application/json'
         else:
             cost_cents = snap.get('next_anticipated_cents')
-            demand_5m = snap.get('demand_5m')
+            demand = snap.get('demand_5m')
             demand_price = snap.get('curr_delivered_cents')
-            if demand_5m < 0.0:
+            if demand < 0.0:
                 #  We only get paid the wholesale energy price when we
                 #  are generating.
                 #
                 demand_price = snap.get('curr_spp_cents')
-            if demand_5m is None or demand_price is None:
+            if demand is None or demand_price is None:
                 current_use = ''
             else:
-                current_use = 'Current load %.1f kW ($%.2f/hour)' % (demand_5m, demand_5m * demand_price / 100.0)
+                current_use = 'Current load %.1f kW ($%.2f/hour)' % (demand, demand * demand_price / 100.0)
 
-            generation = -demand_5m if demand_5m < 0.0 else 0.0
+            generation = -demand if demand < 0.0 else 0.0
 
             if cost_cents:
                 cost = "Current drier cost: $%.2f per load" % drier_dollars(cost_cents, generation=generation)
@@ -267,10 +323,10 @@ body  {background-color: #%s; font-size: %s;}
                   alerts='</br>'.join(alerts),
                   refresh=when)
 
-        start_response('200 OK', [('Content-Type', 'text/html')])
+        start_response('200 OK', [('Content-Type', content_type)] + HTTP_CACHE_CONTROL)
         return [resp.encode('utf-8')]
     except Exception as e:
         traceback.print_exc()
         code = '500 Internal error'
-        start_response(code, [('Content-Type', 'text/plain')])
+        start_response(code, [('Content-Type', 'text/plain')] + HTTP_CACHE_CONTROL)
         return ["%s - %s\n" % (code, e)]
