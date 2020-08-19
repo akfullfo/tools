@@ -260,7 +260,7 @@ def application(environ, start_response):
 
             alerts = []
             if peak_time:
-                alerts.append("Peak $%.2f/kWh at %s (%.0f%% above avg)" %
+                alerts.append("Peak $%.2f/kWh at %s (%.0f%% of avg)" %
                                 (peak_cents / 100.0, time.strftime("%I:%M %p", time.localtime(peak_time)), peak_cents * 100 / avg))
             if snap.get('is_stale'):
                 bgcolor = '606060'
@@ -288,6 +288,15 @@ def application(environ, start_response):
 body  {background-color: #%s; font-size: %s;}
 </style>''' % (bgcolor, fontsz)
 
+            if alerts:
+                alert_msg = '''
+<pre style="font-family:Comic Sans MS; font-size:50%; color:red; background-color: white">
+{alerts}
+</pre>
+'''.format(alerts='</br>'.join(alerts))
+            else:
+                alert_msg = ''
+
             resp = '''
 <html>
 <head>
@@ -298,17 +307,15 @@ body  {background-color: #%s; font-size: %s;}
 <body>
 <center style="font-family:helvetica; font-size:300%; color:white">
 {date} {time}
-<pre style="font-family:Comic Sans MS; font-size:50%; color:red; background-color: white">
-{alerts}
-</pre>
 <pre style="font-family:Comic Sans MS; font-size:70%; color:white">
 {cost}
 </pre>
 <pre style="font-family:Comic Sans MS; font-size:40%; color:white">
 {cheapest}
-(wholesale {wholesale:.2f} c/kWh, delivered {delivered:.2f} c/kWh)
+(wholesale {wholesale:.1f}, delivered {delivered:.1f}, avg {average:.1f} cents/kWh)
 {current_use}
 </pre>
+{alerts}
 </center>
 </body>
 </hmlt>'''.format(style=style,
@@ -319,8 +326,9 @@ body  {background-color: #%s; font-size: %s;}
                   cheapest=cheapest,
                   wholesale=snap.get('curr_spp_cents'),
                   delivered=snap.get('curr_delivered_cents'),
+                  average=snap.get('avg_delivered_cents'),
                   current_use=current_use,
-                  alerts='</br>'.join(alerts),
+                  alerts=alert_msg,
                   refresh=when)
 
         start_response('200 OK', [('Content-Type', content_type)] + HTTP_CACHE_CONTROL)

@@ -35,14 +35,26 @@ DEF_ZONE = 'LZ_NORTH'
 #  Oncor per-kWh delivery charge for North Central Texas as of 2020-8-1
 DEF_DELIVERY = 3.5448
 
-#  ERCOT per-kWh price cap as of 2020-8-1
+#  Oncor monthly base charge in dollars/month
+ONCOR_MONTHLY = 3.42
+
+#  Griddy monthly service fee in dollars/month
+GRIDDY_MONTHY = 9.99
+
+#  Estimated fraction for merchant services, taxes and fees
+TAXES_FEES = 0.09
+
+#  Estimated fraction for ancillary services.  This fraction seems constant for spp value.
+ANCILLARY_SERVICES = 0.279
+
+#  ERCOT per-kWh price cap as of 2020-8-1 in cents/kWh
 ERCOT_PRICE_CAP = 900
 
 #  Limit before real-time data is considered stale
 AGE_LIMIT = 2000
 
 #  Number of days to include in the real-time averaging
-RT_AVG_DAYS = 5
+RT_AVG_DAYS = 10
 
 #  Pricing is considered low-cost if it is less than
 #  the RT_AVG_DAYS average multiplied by this.
@@ -116,13 +128,27 @@ class Browse(HTMLParser):
                 self.currow.append(data)
 
 
+def as_delivered(price, delivery=DEF_DELIVERY):
+    """
+        Attempt to calculate the per-kWh rate based on the current
+        price.  This caclulates a rate for the various fees that
+        are related to kWh and adds a base for monthly fees applied
+        to the 15 minute sample period.  That's kinda bogus but the
+        intent is to estimate an instantaneous price.
+    """
+    extended_price = float(price) * (1.0 + ANCILLARY_SERVICES)
+    delivered_price = (extended_price + delivery) * (1.0 + TAXES_FEES)
+    base = (ONCOR_MONTHLY + GRIDDY_MONTHY) / 30.0 / 24.0 / 4.0
+    return float(delivered_price + base)
+
+
 def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELIVERY, avg_days=RT_AVG_DAYS, dam=False, log=None):
     def get_dam(path):
         data = {}
         if os.path.exists(path):
             with open(path, 'rt') as f:
                 for line in f:
-                    ts, spp_cents, delivered_cents = line.strip().split()
+                    ts, spp_cents = line.strip().split()[:2]
                     spp_cents = float(spp_cents)
 
                     #  This little algorithm is based on the observation that the
@@ -136,9 +162,8 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
                         anticipate = ERCOT_PRICE_CAP
                     if anticipate < spp_cents:
                         anticipate = spp_cents
-                    anticipate += delivery
 
-                    data[ts] = (spp_cents, float(delivered_cents), anticipate)
+                    data[ts] = (spp_cents, as_delivered(spp_cents, delivery=delivery), as_delivered(anticipate, delivery=delivery))
         return data
 
     def get_rt_average(base_dir, as_of, days):
@@ -154,8 +179,8 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
             if os.path.exists(path):
                 with open(path, 'rt') as f:
                     for line in f:
-                        ts, spp_cents, delivered_cents = line.strip().split()
-                        total += float(delivered_cents)
+                        ts, spp_cents = line.strip().split()[:2]
+                        total += as_delivered(spp_cents, delivery=delivery)
                         count += 1
         if count > 0:
             return round(total / count, 4)
@@ -275,7 +300,7 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
         low_cost = False
 
     with open(ercot_rt, 'rt') as f:
-        ts, spp_cents, delivered_cents = f.read().strip().split()
+        ts, spp_cents = f.read().strip().split()[:2]
 
     ts = dateutil.parser.parse(ts)
     ts_t = ts.timestamp()
@@ -284,7 +309,7 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
     if log:
         log.info("Loaded %r: ts %.0f, mtime %.0f, age %.0f, limit %.0f", ercot_rt, ts_t, mtime_t, age, AGE_LIMIT)
 
-    delivered_cents = float(delivered_cents)
+    delivered_cents = as_delivered(spp_cents, delivery=delivery)
 
     snapshot = {
             "as_of": ts.strftime(DATE_FORMAT),

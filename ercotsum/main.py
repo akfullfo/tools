@@ -254,10 +254,7 @@ def main(argv=None, ilog=None):
                             selected_recent[1],
                             selected_recent[1] + args.delivery))
             else:
-                text.append("%s  %.2f  %.2f" % (
-                            time.strftime(DATE_FORMAT, time.localtime(selected_recent[0])),
-                            selected_recent[1],
-                            selected_recent[1] + args.delivery))
+                text.append("%s  %.2f" % (time.strftime(DATE_FORMAT, time.localtime(selected_recent[0])), selected_recent[1]))
     output(args, PAGE_TYPES[page_name], text)
 
 
