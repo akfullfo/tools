@@ -84,7 +84,9 @@ def parse_args(argv, log=None):
     p.add_argument('-a', '--all', action='store_true',
                     help="Download all files not yet recorded within selected pages.  Normally processing stops as soon "
                          "as an existing file is encountered")
-    p.add_argument('name', nargs=1, action='store', help="Camera name")
+    pt = p.add_mutually_exclusive_group(required=True)
+    pt.add_argument('name', nargs='?', action='store', help="Camera name")
+    pt.add_argument('--check-all', action='store_true', help="Check all cameras with credentials.  --check-time only")
 
     args = p.parse_args()
 
@@ -112,8 +114,8 @@ def parse_args(argv, log=None):
     else:
         log.setLevel(logging.INFO)
 
-    if not args.host:
-        args.host = args.name[0]
+    if not args.host and not args.check_all:
+        args.host = args.name
     return args, log
 
 
@@ -412,18 +414,23 @@ def main(argv=None, ilog=None):
     global log
     args, log = parse_args(argv, log=ilog)
 
-    camera = args.name[0]
-
     credentials = load_credentials(args)
     if credentials is None:
         exit(3)
 
-    if camera not in credentials:
-        log.error("%s: No credentials recorded", camera)
-        exit(4)
+    if not args.check_time and not args.check_all:
+        camera = args.name
+        if camera not in credentials:
+            log.error("%s: No credentials recorded", camera)
+            exit(4)
 
     if args.check_time:
-        check_time(camera, credentials[camera], args)
+        if args.check_all:
+            for camera in sorted(credentials):
+                args.host = camera
+                check_time(camera, credentials[camera], args)
+        else:
+            check_time(camera, credentials[camera], args)
         exit(0)
 
     camerabase = os.path.join(args.destdir, camera)
