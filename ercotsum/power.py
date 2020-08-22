@@ -56,6 +56,12 @@ DRIER_KWH = 5
 #
 COST_COLOR_MAX = 50
 
+#  Demand load switch from green to yello
+DEMAND_OK = 2.0
+
+#  Demand load switch from yellow to red
+DEMAND_ALARM = 7.0
+
 log_handler = logging.StreamHandler()
 log = logging.getLogger()
 log_handler.setFormatter(logging.Formatter(fmt="%(asctime)s %(levelname)s %(message)s"))
@@ -203,8 +209,8 @@ def application(environ, start_response):
             when = REFRESH + DELTA
 
         now = time.localtime(now_t)
-        tim = time.strftime("%H:%M:%S", now)
-        dat = time.strftime("%Y-%m-%d", now)
+        tim = time.strftime("%I:%M", now).lstrip('0') + time.strftime("%p", now).lower()
+        dat = time.strftime("%a, %d %b", now)
 
         if json_dam:
             snap = None
@@ -233,8 +239,15 @@ def application(environ, start_response):
                 demand_price = snap.get('curr_spp_cents')
             if demand is None or demand_price is None:
                 current_use = ''
+                use_color = '%02X%02X%02X' % (0, 0, 0)
             else:
                 current_use = 'Current load %.1f kW ($%.2f/hour)' % (demand, demand * demand_price / 100.0)
+                if demand < DEMAND_OK:
+                    use_color = '%02X%02X%02X' % (0, max_shade, 0)
+                elif demand < DEMAND_ALARM:
+                    use_color = '%02X%02X%02X' % (max_shade, max_shade, 0)
+                else:
+                    use_color = '%02X%02X%02X' % (max_shade, 0, 0)
 
             generation = -demand if demand < 0.0 else 0.0
 
@@ -290,9 +303,9 @@ body  {background-color: #%s; font-size: %s;}
 
             if alerts:
                 alert_msg = '''
-<pre style="font-family:Comic Sans MS; font-size:50%; color:red; background-color: white">
+<span style="font-family:Comic Sans MS; font-size:80%; color:red; background-color: white">
 {alerts}
-</pre>
+</span>
 '''.format(alerts='</br>'.join(alerts))
             else:
                 alert_msg = ''
@@ -305,14 +318,16 @@ body  {background-color: #%s; font-size: %s;}
 {style}
 </head>
 <body>
-<center style="font-family:helvetica; font-size:300%; color:white">
-{date} {time}
-<pre style="font-family:Comic Sans MS; font-size:70%; color:white">
-{cost}
-</pre>
-<pre style="font-family:Comic Sans MS; font-size:40%; color:white">
-{cheapest}
-(wholesale {wholesale:.1f}, delivered {delivered:.1f}, avg {average:.1f} cents/kWh)
+<center style="font-family:helvetica; font-size:200%; color:white">
+{time} {date}<br/>
+<span style="font-family:Comic Sans MS; font-size:90%; color:white">
+{cost}<br/>
+</span>
+<span style="font-family:Comic Sans MS; font-size:60%; color:white">
+{cheapest}<br/>
+(wholesale {wholesale:.1f}, delivered {delivered:.1f}, avg {average:.1f} cents/kWh)<br/>
+</span>
+<pre style="font-family:Comic Sans MS; font-size:60%; background-color: white; color:{use_color}">
 {current_use}
 </pre>
 {alerts}
@@ -328,6 +343,7 @@ body  {background-color: #%s; font-size: %s;}
                   delivered=snap.get('curr_delivered_cents'),
                   average=snap.get('avg_delivered_cents'),
                   current_use=current_use,
+                  use_color=use_color,
                   alerts=alert_msg,
                   refresh=when)
 
