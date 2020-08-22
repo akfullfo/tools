@@ -30,7 +30,6 @@ import argparse
 from taskforce import watch_files, poll
 
 def_retain = 65
-def_reprocess = 5
 def_idle = 10
 def_workdir = '/tmp'
 def_basedir = '/cameras'
@@ -72,9 +71,8 @@ def parse_args(argv, log=None):
     p.add_argument('-e', '--log-stderr', action='store_true', help="Log to stderr, default is syslog")
     p.add_argument('-r', '--retain', action='store', type=int, metavar='days', default=def_retain,
                     help="Days to retain original images, use 0 for forever, default %r days" % def_retain)
-    p.add_argument('-R', '--reprocess', action='store', metavar='days', default=def_reprocess,
-                    help="Limit reprocessing to this many days on any change, use 0 for all, "
-                         "or specify a directory default %r days" % def_reprocess)
+    p.add_argument('-R', '--reprocess', action='store', metavar='days',
+                    help="Reprocessing to this many days, use 0 for all, or specify a directory.  Implies --force.")
     p.add_argument('-i', '--idle', action='store', type=int, metavar='secs', default=def_idle,
                     help="Delay processing until there have been no events for this period, default %r secs" % def_idle)
     p.add_argument('-d', '--destdir', action='store', metavar='path', default=def_destdir,
@@ -114,6 +112,9 @@ def parse_args(argv, log=None):
         log.setLevel(logging.WARNING)
     else:
         log.setLevel(logging.INFO)
+
+    if args.reprocess:
+        args.force = True
 
     return args, log
 
@@ -247,7 +248,7 @@ def process(daydir, args, set_latest=False):
         log.info("No new files to process")
         return
 
-    log.info("Processing %d jpgs to mp4", len(paths))
+    log.info("Processing %d jpgs to mp4 from %s", len(paths), daydir)
     with open(list_file, 'w') as f:
         for path in sorted(paths):
             f.write("file '%s'\n" % os.path.abspath(path))
@@ -266,7 +267,7 @@ def process(daydir, args, set_latest=False):
         return
     log.info("%s jpg to mp4 completed in %.1f secs, output: %s", cmd[0], delta, workpath)
 
-    if os.path.exists(outpath):
+    if not args.reprocess and os.path.exists(outpath):
         with open(list_file, 'w') as f:
             f.write("file '%s'\n" % outpath)
             f.write("file '%s'\n" % workpath)
@@ -326,6 +327,8 @@ def scan(cameradir, args):
             if days > 0 and len(daydirs) > days:
                 procdirs = daydirs[-days:]
                 log.debug("Reprocess limited to %r: %r", days, procdirs)
+    else:
+        procdirs = daydirs[-1:]
     for path in procdirs:
         process(path, args, set_latest=(path == daydirs[-1]))
 
