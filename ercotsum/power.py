@@ -56,8 +56,11 @@ DRIER_KWH = 5
 #
 COST_COLOR_MAX = 50
 
-#  Demand load switch from green to yello
-DEMAND_OK = 2.0
+#  Demand load switch from blue to green
+DEMAND_REGEN = 0.0
+
+#  Demand load switch from green to yellosw
+DEMAND_OK = 3.0
 
 #  Demand load switch from yellow to red
 DEMAND_ALARM = 7.0
@@ -242,10 +245,12 @@ def application(environ, start_response):
                 use_color = '%02X%02X%02X' % (0, 0, 0)
             else:
                 current_use = 'Current load %.1f kW ($%.2f/hour)' % (demand, demand * demand_price / 100.0)
-                if demand < DEMAND_OK:
+                if demand < DEMAND_REGEN:
+                    use_color = '%02X%02X%02X' % (0, 0, max_shade)
+                elif demand < DEMAND_OK:
                     use_color = '%02X%02X%02X' % (0, max_shade, 0)
                 elif demand < DEMAND_ALARM:
-                    use_color = '%02X%02X%02X' % (max_shade, max_shade, 0)
+                    use_color = '%02X%02X%02X' % (250, max_shade, 40)
                 else:
                     use_color = '%02X%02X%02X' % (max_shade, 0, 0)
 
@@ -321,7 +326,7 @@ body  {background-color: #%s; font-size: %s;}
 <center style="font-family:helvetica; font-size:200%; color:white">
 {time} {date}<br/>
 <span style="font-family:Comic Sans MS; font-size:90%; color:white">
-{cost}<br/>
+<p>{cost}</p>
 </span>
 <span style="font-family:Comic Sans MS; font-size:60%; color:white">
 {cheapest}<br/>
