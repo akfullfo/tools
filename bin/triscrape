@@ -430,6 +430,7 @@ def main(argv=None, ilog=None):
                 args.host = camera
                 check_time(camera, credentials[camera], args)
         else:
+            camera = args.name
             check_time(camera, credentials[camera], args)
         exit(0)
 
