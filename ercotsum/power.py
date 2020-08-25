@@ -139,8 +139,23 @@ def application(environ, start_response):
             log.error("Authentication failed -- %s", e)
         return False
 
-    def drier_dollars(cost, generation=0.0):
-        return cost * (DRIER_KWH - generation) / 100.0
+    def money(amount):
+        if amount is None:
+            return None
+        try:
+            amount = float(amount)
+        except:
+            return "bad:%r" % amount
+
+        if amount >= 100:
+            return "$%.2f" % (amount / 100.0)
+        elif amount >= 10:
+            return "%.0f&#162;" % amount
+        else:
+            return "%.1f&#162;" % amount
+
+    def drier_cost(cost, generation=0.0):
+        return money(cost * (DRIER_KWH - generation))
 
     def constrain(val, constraint=(0.0, 1.0)):
         if val < constraint[0]:
@@ -199,6 +214,11 @@ def application(environ, start_response):
         max_shade = 0xC0
         bgcolor = '%02X%02X%02X' % (undercoat, undercoat, undercoat)
 
+        red_color = '%02X%02X%02X' % (max_shade, 0, 0)
+        yellow_color = '%02X%02X%02X' % (250, max_shade, 40)
+        green_color = '%02X%02X%02X' % (0, max_shade, 0)
+        blue_color = '%02X%02X%02X' % (0, 0, max_shade)
+
         #  Attempt to schedule the next page load on a refresh boundary.
         #
         query_args = urllib.parse.parse_qs(environ.get('QUERY_STRING', ''))
@@ -244,20 +264,20 @@ def application(environ, start_response):
                 current_use = ''
                 use_color = '%02X%02X%02X' % (0, 0, 0)
             else:
-                current_use = 'Current load %.1f kW ($%.2f/hour)' % (demand, demand * demand_price / 100.0)
+                current_use = 'Current load %.1f kW (%s/hour)' % (demand, money(demand * demand_price))
                 if demand < DEMAND_REGEN:
-                    use_color = '%02X%02X%02X' % (0, 0, max_shade)
+                    use_color = blue_color
                 elif demand < DEMAND_OK:
-                    use_color = '%02X%02X%02X' % (0, max_shade, 0)
+                    use_color = green_color
                 elif demand < DEMAND_ALARM:
-                    use_color = '%02X%02X%02X' % (250, max_shade, 40)
+                    use_color = yellow_color
                 else:
-                    use_color = '%02X%02X%02X' % (max_shade, 0, 0)
+                    use_color = red_color
 
             generation = -demand if demand < 0.0 else 0.0
 
             if cost_cents:
-                cost = "Current drier cost: $%.2f per load" % drier_dollars(cost_cents, generation=generation)
+                cost = "Current drier cost: %s per load" % drier_cost(cost_cents, generation=generation)
             else:
                 cost = ''
             avg = snap.get('avg_delivered_cents', 1.0)
@@ -266,7 +286,7 @@ def application(environ, start_response):
             peak_time = snap.get('dam_peak_next')
             peak_cents = snap.get('dam_peak_delivered')
             if low_cost:
-                cheapest = "The average drier cost is $%.2f per load" % drier_dollars(avg)
+                cheapest = "The average drier cost is %s per load" % drier_cost(avg)
             else:
                 low_when = snap.get('next_low_cost')
                 low_delivered = snap.get('next_low_cost_delivered')
@@ -274,12 +294,12 @@ def application(environ, start_response):
                     low_when = time.strftime("%I:%M %p", time.localtime(low_when))
                 else:
                     low_when = '(unknown)'
-                cheapest = "The cost should drop to $%.2f after %s" % (drier_dollars(low_delivered), low_when)
+                cheapest = "The cost should drop to %s after %s" % (drier_cost(low_delivered), low_when)
 
             alerts = []
             if peak_time:
-                alerts.append("Peak $%.2f/kWh at %s (%.0f%% of avg)" %
-                                (peak_cents / 100.0, time.strftime("%I:%M %p", time.localtime(peak_time)), peak_cents * 100 / avg))
+                alerts.append("Peak %s/kWh at %s (%.0f%% of avg)" %
+                                (money(peak_cents), time.strftime("%I:%M %p", time.localtime(peak_time)), peak_cents * 100.0 / avg))
             if snap.get('is_stale'):
                 bgcolor = '606060'
                 alerts.append('System problem, data is not current')
@@ -308,10 +328,10 @@ body  {background-color: #%s; font-size: %s;}
 
             if alerts:
                 alert_msg = '''
-<span style="font-family:Comic Sans MS; font-size:80%; color:red; background-color: white">
+<span style="font-family:Comic Sans MS; font-size:60%; color:{red}; background-color: white">
 {alerts}
 </span>
-'''.format(alerts='</br>'.join(alerts))
+'''.format(red=red_color, alerts='</br>'.join(alerts))
             else:
                 alert_msg = ''
 
@@ -330,7 +350,7 @@ body  {background-color: #%s; font-size: %s;}
 </span>
 <span style="font-family:Comic Sans MS; font-size:60%; color:white">
 {cheapest}<br/>
-(wholesale {wholesale:.1f}, delivered {delivered:.1f}, avg {average:.1f} cents/kWh)<br/>
+(wholesale {wholesale}, delivered {delivered}, avg {average} per kWh)<br/>
 </span>
 <pre style="font-family:Comic Sans MS; font-size:60%; background-color: white; color:{use_color}">
 {current_use}
@@ -344,9 +364,9 @@ body  {background-color: #%s; font-size: %s;}
                   cost=cost,
                   as_of=as_of,
                   cheapest=cheapest,
-                  wholesale=snap.get('curr_spp_cents'),
-                  delivered=snap.get('curr_delivered_cents'),
-                  average=snap.get('avg_delivered_cents'),
+                  wholesale=money(snap.get('curr_spp_cents')),
+                  delivered=money(snap.get('curr_delivered_cents')),
+                  average=money(snap.get('avg_delivered_cents')),
                   current_use=current_use,
                   use_color=use_color,
                   alerts=alert_msg,
