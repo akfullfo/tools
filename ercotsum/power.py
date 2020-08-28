@@ -147,9 +147,10 @@ def application(environ, start_response):
         except:
             return "bad:%r" % amount
 
-        if amount >= 100:
+        how_big = abs(amount)
+        if how_big >= 100:
             return "$%.2f" % (amount / 100.0)
-        elif amount >= 10:
+        elif how_big >= 10:
             return "%.0f&#162;" % amount
         else:
             return "%.1f&#162;" % amount
