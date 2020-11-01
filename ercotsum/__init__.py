@@ -33,7 +33,7 @@ DEF_DEMAND_DIR = '/var/local/rainbarrel'
 DEF_ZONE = 'LZ_NORTH'
 
 #  Oncor per-kWh delivery charge for North Central Texas as of 2020-8-1
-DEF_DELIVERY = 3.5448
+DEF_DELIVERY = 3.922
 
 #  Oncor monthly base charge in dollars/month
 ONCOR_MONTHLY = 3.42
@@ -54,7 +54,7 @@ ERCOT_PRICE_CAP = 900
 AGE_LIMIT = 2000
 
 #  Number of days to include in the real-time averaging
-RT_AVG_DAYS = 10
+RT_AVG_DAYS = 35
 
 #  Pricing is considered low-cost if it is less than
 #  the RT_AVG_DAYS average multiplied by this.

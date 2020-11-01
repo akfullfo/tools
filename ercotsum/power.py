@@ -156,7 +156,10 @@ def application(environ, start_response):
             return "%.1f&#162;" % amount
 
     def drier_cost(cost, generation=0.0):
-        return money(cost * (DRIER_KWH - generation))
+        if cost is None:
+            return '(unknown)'
+        else:
+            return money(cost * (DRIER_KWH - generation))
 
     def constrain(val, constraint=(0.0, 1.0)):
         if val < constraint[0]:

@@ -225,9 +225,17 @@ def main(argv=None, ilog=None):
         if len(row) != table_width:
             log.error("Row %d has %r columns, %d expected", rownum, len(row), table_width)
             return 2
+
+        #  On daylight saving changes, repeated times are marked with a '*'
+        #  Good to know!
+        #
+        if row[1].endswith('*'):
+            row[1] = row[1][:-1]
+
         if page_name == 'RT':
             row_time_t = time.mktime(time.strptime(row[0] + ' ' + row[1] + '00', "%m/%d/%Y %H%M%S"))
         elif page_name == 'DAM':
+
             hour = int(row[1])
             inc = 0
             if hour == 24:
