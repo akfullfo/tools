@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+# ________________________________________________________________________
+#
+#  Copyright (C) 2020 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+
+import os
+import sys
+import json
+import time
+import signal
+import logging
+import logging.handlers
+import argparse
+import urllib.request
+
+DEF_DELAY = 60
+DEF_RANDOM_DELTA = 15
+DEF_BASEDIR = '/var/local/powernap'
+DEF_POWER_URL = 'https://mmm.fullford.com/power?fmt=json'
+DEF_TIMEOUT = 30
+
+STATE_SUBDIR = 'state'
+HIST_SUBDIR = 'history'
+
+STATE_MAP = {
+    'low_cost': ('stop', 'start'),
+    'high_cost': ('stop', 'start'),
+}
+
+
+class Fatal(Exception):
+    pass
+
+
+def parse_args(argv, log=None):
+    program = os.path.basename(os.path.splitext(sys.argv[0])[0])
+
+    p = argparse.ArgumentParser(
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            description="""
+    Periodically check the current power pricing and make decisions
+    about turning off and on high load systems (software or devices).
+    """
+    )
+
+    p.add_argument('-v', '--verbose', action='store_true', help="Verbose logging")
+    p.add_argument('-q', '--quiet', action='store_true', help="Quiet logging, errors and warnings only")
+    p.add_argument('-e', '--log-stderr', action='store_true', help="Log to stderr, default is syslog")
+    p.add_argument('-D', '--delay', action='store', type=int, metavar='secs', default=DEF_DELAY,
+                    help="Delay between checks power pricing, default %r secs" % DEF_DELAY)
+    p.add_argument('-R', '--random-delta', action='store', type=int, metavar='secs', default=DEF_RANDOM_DELTA,
+                    help="Randomize the URL lookup to avoid server congestion, default %r secs" % DEF_RANDOM_DELTA)
+    p.add_argument('-t', '--timeout', action='store', type=int, metavar='secs', default=DEF_TIMEOUT,
+                    help="Timeout on HTTP gets, default %r secs" % DEF_TIMEOUT)
+    p.add_argument('-d', '--basedir', action='store', metavar='path', default=DEF_BASEDIR,
+                    help="Directory to hold state and history regarding services that have been turned off or on, "
+                         "default %r" % DEF_BASEDIR)
+    p.add_argument('-u', '--power-url', action='store', default=DEF_POWER_URL,
+                    help="URL to fetch the 'ercotsum' JSON power pricing, default %r" % DEF_POWER_URL)
+    p.add_argument('-n', '--dryrun', action='store_true',
+                    help="Log any power control command that might be run but don't run it")
+    p.add_argument('-1', '--once', action='store_true', help="Exit after initial processing")
+    p.add_argument('-m', '--manual', action='store', metavar='command=state',
+                    help="Run the command 'command --state' and record that the operation was manual and normal processing "
+                         "should be skipped until further notice.  'state' can be 'stop', 'start' or 'clear' which "
+                         "returns control to normal processing.  Implies --once.")
+
+    args = p.parse_args()
+
+    if args.log_stderr:
+        log_handler = logging.StreamHandler()
+        log_formatter = logging.Formatter(fmt="%(asctime)s %(levelname)s %(message)s")
+    else:
+        logparams = {}
+        for addr in ['/dev/log', '/var/run/log']:
+            if os.path.exists(addr):
+                logparams['address'] = addr
+                break
+        log_handler = logging.handlers.SysLogHandler(**logparams)
+        log_formatter = logging.Formatter(fmt="%(name)s[%(process)d]: %(levelname)s %(message).1000s")
+
+    if not log:
+        log = logging.getLogger(program)
+        log_handler.setFormatter(log_formatter)
+        log.addHandler(log_handler)
+
+    if args.verbose:
+        log.setLevel(logging.DEBUG)
+    elif args.quiet:
+        log.setLevel(logging.WARNING)
+    else:
+        log.setLevel(logging.INFO)
+
+    if args.manual:
+        args.once = True
+    return args, log
+
+
+def set_signals():
+    def catch(sig, frame):
+        log.info("Exiting on SIG%s", sig)
+        exit(0)
+
+    if signal.signal(signal.SIGINT, catch) == signal.SIG_IGN:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if signal.signal(signal.SIGHUP, catch) == signal.SIG_IGN:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, catch)
+
+
+def get_state_file(args, level):
+    return os.path.join(args.basedir, STATE_SUBDIR, level + '.state')
+
+
+def map_state(level, state):
+    """
+        Bidirectional mapping between bool and state name
+    """
+    truth = STATE_MAP[level]
+    if state == truth[0]:
+        return False
+    elif state == truth[1]:
+        return True
+    elif isinstance(state, bool):
+        return truth[1] if state else truth[0]
+    else:
+        return None
+
+
+def get_state(args, level):
+    path = get_state_file(args, level)
+    if os.path.exists(path):
+        with open(path, 'rt') as f:
+            return map_state(level, f.read().strip())
+    else:
+        return None
+
+
+def set_state(args, level, state):
+    path = get_state_file(args, level)
+    fstate = get_state(args, level)
+    if state == fstate:
+        return False
+    temp = path + '.tmp'
+    with open(temp, 'wt') as f:
+        f.write("%s\n" % map_state(level, state))
+    os.rename(temp, path)
+    return True
+
+
+def process(args):
+    state_dir = os.path.join(args.basedir, STATE_SUBDIR)
+    if not os.path.isdir(state_dir):
+        try:
+            os.makedirs(state_dir)
+        except Exception as e:
+            Fatal("State dir %r doesn't exist and can't be created -- %s" % (state_dir, e))
+    hist_dir = os.path.join(args.basedir, HIST_SUBDIR)
+    if not os.path.isdir(hist_dir):
+        try:
+            os.makedirs(hist_dir)
+        except Exception as e:
+            Fatal("State dir %r doesn't exist and can't be created -- %s" % (hist_dir, e))
+
+    with urllib.request.urlopen(args.power_url, timeout=args.timeout) as req:
+        snap = json.load(req)
+
+    low_cost = snap.get('is_low_cost')
+    low_cost_change = set_state(args, 'low_cost', low_cost)
+    if low_cost_change:
+        log.info("Low cost state changed to %r", low_cost)
+    else:
+        log.info("No change in low cost state, currently %r", get_state(args, 'low_cost'))
+
+    high_cost = snap.get('is_high_cost')
+    high_cost_change = set_state(args, 'high_cost', high_cost)
+    if high_cost_change:
+        log.info("High cost state changed to %r", high_cost)
+    else:
+        log.info("No change in high cost state, currently %r", get_state(args, 'high_cost'))
+
+    return
+
+
+def main(argv=None, ilog=None):
+    global log
+    args, log = parse_args(argv, log=ilog)
+
+    set_signals()
+
+    while True:
+        ret = 0
+        try:
+            next_run = time.time() + args.delay
+            process(args)
+            delta = next_run - time.time()
+        except Fatal as e:
+            log.error("Fatal -- %s", e)
+            return 3
+        except Exception as e:
+            log.error("Unexpected exception -- %s", e, exc_info=True)
+            delta = 0
+            ret = 2
+
+        if args.once:
+            log.info("Exiting due to --once flag")
+            return ret
+
+        if delta <= 0:
+            log.warning("Next run due %.1f secs before last run completed", -delta)
+            delta = 3
+        log.debug("%.0f sec delay before next run", delta)
+        time.sleep(delta)
+
+
+exit(main())
