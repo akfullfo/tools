@@ -19,6 +19,7 @@
 import time
 import os
 import datetime
+import math
 import dateutil.parser
 from html.parser import HTMLParser
 import urllib.request
@@ -311,6 +312,17 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
 
     delivered_cents = as_delivered(spp_cents, delivery=delivery)
 
+    #  Cost level is an integer where 0 means low cost, > 0 means
+    #  successively higher cost.  Any value < 0 means we get paid
+    #  to waste power, which is weird but apparently happens every
+    #  now any then.
+    #
+    #  Note that this is based on the real-time rate and not on the
+    #  anticipated rate.  Operations that can't react quickly such
+    #  as a clothes-drier run should use the "is_low_cost" flag.
+    #
+    cost_level = math.floor(delivered_cents / low_cost_level)
+
     snapshot = {
             "as_of": ts.strftime(DATE_FORMAT),
             "as_of_t": ts_t,
@@ -321,6 +333,7 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
             "demand_1m": demand[0],
             "demand_5m": demand[1],
             "demand_15m": demand[2],
+            "cost_level": cost_level,
         }
     if dam_current:
         anticipated = dam_current[2]

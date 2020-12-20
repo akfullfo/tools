@@ -20,11 +20,13 @@
 import os
 import sys
 import json
-import time
+import argparse
 import signal
+import time
+import datetime
+import dateutil.parser
 import logging
 import logging.handlers
-import argparse
 import urllib.request
 
 DEF_DELAY = 60
@@ -32,8 +34,8 @@ DEF_RANDOM_DELTA = 15
 DEF_BASEDIR = '/var/local/powernap'
 DEF_POWER_URL = 'https://mmm.fullford.com/power?fmt=json'
 DEF_TIMEOUT = 30
+DEF_HYSTERESIS = 1800
 
-STATE_SUBDIR = 'state'
 HIST_SUBDIR = 'history'
 
 STATE_MAP = {
@@ -43,6 +45,10 @@ STATE_MAP = {
 
 
 class Fatal(Exception):
+    pass
+
+
+class Error(Exception):
     pass
 
 
@@ -71,6 +77,9 @@ def parse_args(argv, log=None):
                          "default %r" % DEF_BASEDIR)
     p.add_argument('-u', '--power-url', action='store', default=DEF_POWER_URL,
                     help="URL to fetch the 'ercotsum' JSON power pricing, default %r" % DEF_POWER_URL)
+    p.add_argument('-H', '--hysteresis', action='store', type=int, metavar='secs', default=DEF_HYSTERESIS,
+                    help="Ensure state change operations are triggered no more frequently than this, "
+                         "default %r secs" % DEF_HYSTERESIS)
     p.add_argument('-n', '--dryrun', action='store_true',
                     help="Log any power control command that might be run but don't run it")
     p.add_argument('-1', '--once', action='store_true', help="Exit after initial processing")
@@ -122,8 +131,24 @@ def set_signals():
     signal.signal(signal.SIGTERM, catch)
 
 
-def get_state_file(args, level):
-    return os.path.join(args.basedir, STATE_SUBDIR, level + '.state')
+def get_state_file(args):
+    return os.path.join(args.basedir, 'state.json')
+
+
+def history(args, state):
+    now = datetime.datetime.now(tz=dateutil.tz.tzlocal())
+    path = os.path.join(args.basedir, HIST_SUBDIR, now.strftime("%Y%m"))
+    if not os.path.isdir(path):
+        try:
+            os.makedirs(path)
+        except Exception as e:
+            raise Error("History dir %r doesn't exist and can't be created -- %s" % (path, e))
+    path = os.path.join(path, 'history.log')
+    with open(path, "at") as f:
+        f.write("%s %s%s\n" % (
+                now.strftime("%Y-%m-%d %H:%M:%S%z"),
+                state.get('cost_level'),
+                ' %r deferred' % state.get('deferred_level') if state.get('deferred') else ''))
 
 
 def map_state(level, state):
@@ -141,34 +166,59 @@ def map_state(level, state):
         return None
 
 
-def get_state(args, level):
-    path = get_state_file(args, level)
+def get_state(args):
+    path = get_state_file(args)
     if os.path.exists(path):
         with open(path, 'rt') as f:
-            return map_state(level, f.read().strip())
+            return json.load(f)
     else:
-        return None
+        return {}
 
 
-def set_state(args, level, state):
-    path = get_state_file(args, level)
-    fstate = get_state(args, level)
-    if state == fstate:
-        return False
+def set_state(args, cost_level):
+    prev_state = get_state(args)
+    next_state = prev_state.copy()
+    last_change = prev_state.get('last_chnage')
+    now = time.time()
+
+    if prev_state.get('deferred') is None or last_change is None:
+        next_state['deferred'] = False
+    else:
+        next_state['deferred'] = (last_change + args.hysteresis > now)
+
+    prev_level = prev_state.get('cost_level')
+    if prev_level != cost_level:
+        state_change = True
+        if prev_level is not None and prev_level < cost_level:
+            if next_state['deferred']:
+                next_state['deferred_level'] = cost_level
+                state_change = False
+        if state_change:
+            next_state['last_change'] = now
+            next_state['cost_level'] = cost_level
+            next_state['deferred_level'] = None
+
+    if prev_state == next_state:
+        return False, prev_level
+
+    path = get_state_file(args)
     temp = path + '.tmp'
     with open(temp, 'wt') as f:
-        f.write("%s\n" % map_state(level, state))
+        f.write(json.dumps(next_state) + os.linesep)
     os.rename(temp, path)
-    return True
+
+    history(args, next_state)
+    return True, prev_level
+
+
+def manage(args, cost_level, prev_level):
+    """
+        Manage devices by running recorded scripts
+    """
+    pass
 
 
 def process(args):
-    state_dir = os.path.join(args.basedir, STATE_SUBDIR)
-    if not os.path.isdir(state_dir):
-        try:
-            os.makedirs(state_dir)
-        except Exception as e:
-            Fatal("State dir %r doesn't exist and can't be created -- %s" % (state_dir, e))
     hist_dir = os.path.join(args.basedir, HIST_SUBDIR)
     if not os.path.isdir(hist_dir):
         try:
@@ -179,19 +229,13 @@ def process(args):
     with urllib.request.urlopen(args.power_url, timeout=args.timeout) as req:
         snap = json.load(req)
 
-    low_cost = snap.get('is_low_cost')
-    low_cost_change = set_state(args, 'low_cost', low_cost)
-    if low_cost_change:
-        log.info("Low cost state changed to %r", low_cost)
+    cost_level = snap.get('cost_level')
+    cost_change, prev_level = set_state(args, cost_level)
+    if cost_change:
+        manage(args, cost_level, prev_level)
+        log.info("Cost level changed to %r", cost_level)
     else:
-        log.info("No change in low cost state, currently %r", get_state(args, 'low_cost'))
-
-    high_cost = snap.get('is_high_cost')
-    high_cost_change = set_state(args, 'high_cost', high_cost)
-    if high_cost_change:
-        log.info("High cost state changed to %r", high_cost)
-    else:
-        log.info("No change in high cost state, currently %r", get_state(args, 'high_cost'))
+        log.info("No change in cost level, currently %r", cost_level)
 
     return
 
