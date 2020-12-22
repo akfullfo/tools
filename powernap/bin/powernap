@@ -39,7 +39,7 @@ DEF_BASEDIR = '/var/local/powernap'
 DEF_PROGDIR = '/usr/local/powernap/controls'
 DEF_POWER_URL = 'https://mmm.fullford.com/power?fmt=json'
 DEF_TIMEOUT = 30
-DEF_HYSTERESIS = 1800
+DEF_HYSTERESIS = 1200
 DEF_CHECK_PERIOD = 900
 
 HIST_SUBDIR = 'history'
@@ -163,21 +163,6 @@ def history(args, state):
                     (now.strftime("%Y-%m-%d %H:%M:%S%z"),
                     state.get('cost_level'),
                     ' %r deferred' % state.get('deferred_level') if state.get('deferred') else ''))
-
-
-def map_state(level, state):
-    """
-        Bidirectional mapping between bool and state name
-    """
-    truth = STATE_MAP[level]
-    if state == truth[0]:
-        return False
-    elif state == truth[1]:
-        return True
-    elif isinstance(state, bool):
-        return truth[1] if state else truth[0]
-    else:
-        return None
 
 
 def get_state(args):
