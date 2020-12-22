@@ -1,0 +1,359 @@
+#!/usr/bin/env python
+# ________________________________________________________________________
+#
+#  Copyright (C) 2020 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+
+import os
+import sys
+import json
+import argparse
+import signal
+import time
+import datetime
+import subprocess
+import dateutil.parser
+import logging
+import logging.handlers
+try:
+    from urllib.request import urlopen
+except ImportError:
+    from urllib2 import urlopen
+
+DEF_DELAY = 60
+DEF_RANDOM_DELTA = 15
+DEF_BASEDIR = '/var/local/powernap'
+DEF_PROGDIR = '/usr/local/powernap/controls'
+DEF_POWER_URL = 'https://mmm.fullford.com/power?fmt=json'
+DEF_TIMEOUT = 30
+DEF_HYSTERESIS = 1800
+DEF_CHECK_PERIOD = 900
+
+HIST_SUBDIR = 'history'
+
+STATE_MAP = {
+    'low_cost': ('stop', 'start'),
+    'high_cost': ('stop', 'start'),
+}
+
+log = None
+last_check_run = 0
+
+
+class Fatal(Exception):
+    pass
+
+
+class Error(Exception):
+    pass
+
+
+def parse_args(argv, log=None):
+    program = os.path.basename(os.path.splitext(sys.argv[0])[0])
+
+    p = argparse.ArgumentParser(
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            description="""
+    Periodically check the current power pricing and make decisions
+    about turning off and on high load systems (software or devices).
+    """
+    )
+
+    p.add_argument('-v', '--verbose', action='store_true', help="Verbose logging")
+    p.add_argument('-q', '--quiet', action='store_true', help="Quiet logging, errors and warnings only")
+    p.add_argument('-e', '--log-stderr', action='store_true', help="Log to stderr, default is syslog")
+    p.add_argument('-D', '--delay', action='store', type=int, metavar='secs', default=DEF_DELAY,
+                    help="Delay between checks power pricing, default %r secs" % DEF_DELAY)
+    p.add_argument('-t', '--timeout', action='store', type=int, metavar='secs', default=DEF_TIMEOUT,
+                    help="Timeout on HTTP gets, default %r secs" % DEF_TIMEOUT)
+    p.add_argument('-d', '--basedir', action='store', metavar='path', default=DEF_BASEDIR,
+                    help="Directory to hold state and history regarding services that have been turned off or on, "
+                         "default %r" % DEF_BASEDIR)
+    p.add_argument('-p', '--progdir', action='store', metavar='path', default=DEF_PROGDIR,
+                    help="Directory to find programs to run on a state change, default %r" % DEF_PROGDIR)
+    p.add_argument('-u', '--power-url', action='store', default=DEF_POWER_URL,
+                    help="URL to fetch the 'ercotsum' JSON power pricing, default %r.  "
+                         "If the value is a path to an existing file, that file will be read each cycle" % DEF_POWER_URL)
+    p.add_argument('-H', '--hysteresis', action='store', type=int, metavar='secs', default=DEF_HYSTERESIS,
+                    help="Ensure state change operations are triggered no more frequently than this, "
+                         "default %r secs" % DEF_HYSTERESIS)
+    p.add_argument('-C', '--check-period', action='store', type=int, metavar='secs', default=DEF_CHECK_PERIOD,
+                    help="Run state change programs at least this frequently even if the state has not changed, "
+                         "default %r secs" % DEF_CHECK_PERIOD)
+    p.add_argument('-n', '--dryrun', action='store_true',
+                    help="Log any power control command that might be run but don't run it")
+    p.add_argument('-1', '--once', action='store_true', help="Exit after initial processing")
+    p.add_argument('-m', '--manual', action='store', metavar='command=state',
+                    help="Run the command 'command --state' and record that the operation was manual and normal processing "
+                         "should be skipped until further notice.  'state' can be 'stop', 'start' or 'clear' which "
+                         "returns control to normal processing.  Implies --once.")
+
+    args = p.parse_args()
+
+    if args.log_stderr:
+        log_handler = logging.StreamHandler()
+        log_formatter = logging.Formatter(fmt="%(asctime)s %(levelname)s %(message)s")
+    else:
+        logparams = {}
+        for addr in ['/dev/log', '/var/run/log']:
+            if os.path.exists(addr):
+                logparams['address'] = addr
+                break
+        log_handler = logging.handlers.SysLogHandler(**logparams)
+        log_formatter = logging.Formatter(fmt="%(name)s[%(process)d]: %(levelname)s %(message).1000s")
+
+    if not log:
+        log = logging.getLogger(program)
+        log_handler.setFormatter(log_formatter)
+        log.addHandler(log_handler)
+
+    if args.verbose:
+        log.setLevel(logging.DEBUG)
+    elif args.quiet:
+        log.setLevel(logging.WARNING)
+    else:
+        log.setLevel(logging.INFO)
+
+    if args.manual:
+        args.once = True
+    return args, log
+
+
+def set_signals():
+    def catch(sig, frame):
+        if log:
+            log.info("Exiting on SIG%s", sig)
+        exit(int(sig != signal.SIGTERM))
+
+    if signal.signal(signal.SIGINT, catch) == signal.SIG_IGN:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if signal.signal(signal.SIGHUP, catch) == signal.SIG_IGN:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, catch)
+
+
+def get_state_file(args):
+    return os.path.join(args.basedir, 'state.json')
+
+
+def history(args, state):
+    now = datetime.datetime.now(tz=dateutil.tz.tzlocal())
+    path = os.path.join(args.basedir, HIST_SUBDIR, now.strftime("%Y%m"))
+    if not os.path.isdir(path):
+        try:
+            os.makedirs(path)
+        except Exception as e:
+            raise Error("History dir %r doesn't exist and can't be created -- %s" % (path, e))
+    path = os.path.join(path, 'history.log')
+    with open(path, "at") as f:
+        f.write("%s %s%s\n" %
+                    (now.strftime("%Y-%m-%d %H:%M:%S%z"),
+                    state.get('cost_level'),
+                    ' %r deferred' % state.get('deferred_level') if state.get('deferred') else ''))
+
+
+def map_state(level, state):
+    """
+        Bidirectional mapping between bool and state name
+    """
+    truth = STATE_MAP[level]
+    if state == truth[0]:
+        return False
+    elif state == truth[1]:
+        return True
+    elif isinstance(state, bool):
+        return truth[1] if state else truth[0]
+    else:
+        return None
+
+
+def get_state(args):
+    path = get_state_file(args)
+    if os.path.exists(path):
+        with open(path, 'rt') as f:
+            return json.load(f)
+    else:
+        return {}
+
+
+def set_state(args, cost_level):
+    prev_state = get_state(args)
+    next_state = prev_state.copy()
+    last_change = prev_state.get('last_change')
+    now = time.time()
+
+    deferred_by = 0
+    next_state['deferred'] = False
+    next_state['deferred_level'] = None
+
+    prev_level = prev_state.get('cost_level')
+    log.debug("last_change %r, prev_level %r, cost_level %r", last_change, prev_level, cost_level)
+    if prev_level != cost_level:
+        state_change = True
+        if last_change is not None and prev_level is not None and cost_level < prev_level:
+            deferred_by = last_change + args.hysteresis - now
+            if deferred_by > 0:
+                next_state['deferred'] = True
+                next_state['deferred_level'] = cost_level
+                state_change = False
+        if state_change:
+            next_state['last_change'] = now
+            next_state['cost_level'] = cost_level
+
+    if prev_state == next_state:
+        log.debug("No change in cost level, currently %r", cost_level)
+        return False, prev_level, next_state['deferred']
+
+    path = get_state_file(args)
+    temp = path + '.tmp'
+    with open(temp, 'wt') as f:
+        f.write(json.dumps(next_state) + os.linesep)
+    os.rename(temp, path)
+
+    history(args, next_state)
+    if next_state['deferred']:
+        log.info("Cost level change to %r deferred for %.0f secs", cost_level, deferred_by)
+    else:
+        log.info("Cost level changed to %r%s", cost_level, ', was deferred' if prev_state['deferred'] else '')
+    return True, prev_level, next_state['deferred']
+
+
+def control(args, cost_level, prev_level):
+    """
+        Manage devices by running recorded control programs.
+
+        All executable files found the the program dir
+        will be run on each state change with two arguments,
+        the previous cost level and the new cost level.
+        They are run in alphabetical order, but a best
+        practice is to avoid interdependence in these
+        programs.
+
+        The programs are also run periodically between
+        state changes in case a change was missed.  In
+        this case, both args will have the same value.
+
+        For now, the programs have no watchdog so if
+        a program hangs, the whole system hangs.  Any
+        remote access from the programs should always
+        include a connection timeout.
+    """
+    global last_check_run
+
+    now = time.time()
+    if cost_level == prev_level:
+        if args.check_period and last_check_run + args.check_period > now:
+            log.debug("Skipping control check, too soon")
+            return False
+        else:
+            log.info("Commencing control check")
+    else:
+        log.info("Commencing control change from %r to %r", prev_level, cost_level)
+    last_check_run = now
+
+    runnable = []
+    if os.path.isdir(args.progdir):
+        for fname in os.listdir(args.progdir):
+            if fname.startswith('.'):
+                continue
+            path = os.path.join(args.progdir, fname)
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                runnable.append(path)
+            else:
+                log.debug("Skipping %r, not executable", path)
+        if runnable:
+            runnable.sort()
+        else:
+            log.info("No runnable programs found in %r", args.progdir)
+    else:
+        log.info("Program dir %r does not exist", args.progdir)
+    for prog in runnable:
+        cmd = [prog, str(prev_level), str(cost_level)]
+        cmd_str = ' '.join([os.path.basename(cmd[0])] + cmd[1:])
+        if args.dryrun:
+            log.info("Would run: %s", cmd_str)
+        else:
+            try:
+                log.info("Starting: %s", cmd_str)
+                resp = subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True)
+                if resp:
+                    for line in resp.splitlines():
+                        log.info("    %s", line.rstrip())
+                log.info("Complete: %s", cmd_str)
+            except subprocess.CalledProcessError as e:
+                log.warning("Control program %r failed -- %s", cmd_str, e.output if e.output else e)
+            except Exception as e:
+                log.error("Control program %r execution failed -- %s", cmd_str, e)
+    return True
+
+
+def process(args):
+
+    hist_dir = os.path.join(args.basedir, HIST_SUBDIR)
+    if not os.path.isdir(hist_dir):
+        try:
+            os.makedirs(hist_dir)
+        except Exception as e:
+            Fatal("State dir %r doesn't exist and can't be created -- %s" % (hist_dir, e))
+
+    if os.path.isfile(args.power_url):
+        with open(args.power_url, "rt") as f:
+            snap = json.load(f)
+    else:
+        with urlopen(args.power_url, timeout=args.timeout) as req:
+            snap = json.load(req)
+
+    cost_level = snap.get('cost_level')
+    cost_change, prev_level, deferred = set_state(args, cost_level)
+
+    if not deferred:
+        control(args, cost_level, prev_level)
+
+    return
+
+
+def main(argv=None, ilog=None):
+    global log
+    args, log = parse_args(argv, log=ilog)
+
+    set_signals()
+
+    while True:
+        ret = 0
+        try:
+            next_run = time.time() + args.delay
+            process(args)
+            delta = next_run - time.time()
+        except Fatal as e:
+            log.error("Fatal -- %s", e)
+            return 3
+        except Exception as e:
+            log.error("Unexpected exception -- %s", e, exc_info=True)
+            delta = 0
+            ret = 2
+
+        if args.once:
+            log.info("Exiting due to --once flag")
+            return ret
+
+        if delta <= 0:
+            log.warning("Next run due %.1f secs before last run completed", -delta)
+            delta = 3
+        log.debug("%.0f sec delay before next run", delta)
+        time.sleep(delta)
+
+
+exit(main())
