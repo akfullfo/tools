@@ -44,11 +44,6 @@ DEF_CHECK_PERIOD = 900
 
 HIST_SUBDIR = 'history'
 
-STATE_MAP = {
-    'low_cost': ('stop', 'start'),
-    'high_cost': ('stop', 'start'),
-}
-
 log = None
 last_check_run = 0
 

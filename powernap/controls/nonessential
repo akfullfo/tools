@@ -17,56 +17,51 @@
 # ________________________________________________________________________
 #
 
+import os
 import sys
 import json
-import os.path
+import wakeonlan
 import argparse
 import subprocess
 
 DEF_BASE_DIR = os.path.dirname(os.path.dirname(sys.argv[0]))
 
+DEF_HOSTS = {
+        "dubious": "74:d0:2b:0d:27:e6",
+        "host-tree": "70:54:d2:90:69:03",
+        "host-twig": "4c:72:b9:99:39:aa",
+        "host-trinket": "70:54:d2:90:69:ee",
+    }
+
 DEF_TIMEOUT = 10
-
-DEF_TRANSITION_LEVEL = 1
-
-CMD_STATUS = 'systemctl is-active boinc-client'
-CMD_STOP = 'systemctl stop boinc-client'
-CMD_START = 'systemctl start boinc-client'
-
-#  Check mode is:  systemctl is-active boinc-client
-#  Answers: <= 0 should be "active"
-#           >= 1 should be "inactive"
 
 
 def parse_args(argv):
-    config_file = os.path.join(DEF_BASE_DIR, 'config', 'boinc.json')
-    ssh_keyfile = os.path.join(DEF_BASE_DIR, '.ssh', 'id_rsa')
+    config_file = os.path.join(DEF_BASE_DIR, 'config', 'nonessential.json')
+    ssh_keyfile = os.path.join(DEF_BASE_DIR, '.ssh', 'id_rsa_poweroff')
 
     p = argparse.ArgumentParser(
             formatter_class=argparse.RawDescriptionHelpFormatter,
             description="""
-    Issue remote controls to boinc servers.
+    Issue poweroff and wake-on-lan commands to control servers
+    running non-estential functions.
 
-    The boinc-client is started on cost levels below the
-    transition level and stopped on cost levels equal or
-    above it.
+    These is started on transitions to cost level below 2
+    and stopped on transitions to cost level above 2.
     """
     )
-    p.add_argument('-T', '--transition-level', action='store', type=int, metavar='num', default=DEF_TRANSITION_LEVEL,
-                    help="Cost level when processing should transition from active to inactive, default %r" % DEF_TRANSITION_LEVEL)
     p.add_argument('-C', '--config-file', action='store', metavar='path', default=config_file,
                     help="Configuration in JSON format, default %r" % config_file)
-    p.add_argument('-H', '--host', action='append', metavar='addr',
-                    help="Remote boinc host, default from config")
-    p.add_argument('-i', '--ssh_keyfile', action='store', default=ssh_keyfile, metavar='path',
-                    help="Alternate key file to use if it exists, default %s" % ssh_keyfile)
+    p.add_argument('-i', '--ssh-keyfile', action='store', default=ssh_keyfile, metavar='path',
+                    help="Ssh key file allowing remote poweroff, default %s" % ssh_keyfile)
     p.add_argument('-t', '--timeout', action='store', type=int, default=DEF_TIMEOUT, metavar='secs',
                     help="Connect timeout for ssh, default %r" % DEF_TIMEOUT)
+    p.add_argument('--host', action='store', metavar='internal_structure', help=argparse.SUPPRESS)
     p.add_argument('prev_level', type=int, help="The previous cost level")
     p.add_argument('next_level', type=int, help="The next cost level")
 
     args = p.parse_args()
-    config = {}
+
     try:
         with open(args.config_file, "rt") as f:
             config = json.load(f)
@@ -74,18 +69,15 @@ def parse_args(argv):
             setattr(args, tag, info)
     except Exception as e:
         raise argparse.ArgumentTypeError("Config error: %s" % e)
-    if not args.host:
-        raise argparse.ArgumentTypeError("No hosts provided")
+
+    if not os.path.exists(args.ssh_keyfile):
+        raise argparse.ArgumentTypeError("Dedicated power-off ssh key file %r is missing" % args.ssh_keyfile)
     return args
 
 
 def main(argv=None):
     args = parse_args(argv)
 
-    if args.next_level < args.transition_level:
-        expected = 'active'
-    else:
-        expected = 'inactive'
     is_check = args.prev_level == args.next_level
 
     ssh_args = ['ssh',
@@ -96,13 +88,16 @@ def main(argv=None):
                     '-o', 'PreferredAuthentications=publickey',
                     '-o', 'ConnectTimeout=%d' % args.timeout,
                 ]
-    if os.path.isfile(args.ssh_keyfile):
-        ssh_args += ['-i', args.ssh_keyfile]
+    ssh_args += ['-i', args.ssh_keyfile]
 
-    for host in args.host:
-        cmd = ssh_args + [host, CMD_STATUS]
+    for host, info in sorted(args.host.items()):
+        if not is_check:
+            print("%s: Level %d, threshold %d, would %s" %
+                    (host, args.next_level, info['threshold'], 'start' if args.next_level < info['threshold'] else 'stop'))
+        continue
+        cmd = ssh_args + [host, 'true']
         try:
-            status = subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True).strip()
+            subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True).strip()
         except subprocess.CalledProcessError as e:
             status = e.output.strip()
             if status != 'inactive':
@@ -111,15 +106,6 @@ def main(argv=None):
         except Exception as e:
             sys.stderr.write("%s status check failed -- %s\n" % (host, e))
             continue
-        if status != expected:
-            if is_check:
-                sys.stderr.write("%s found %s when %s expected, attempting correction\n" % (host, status, expected))
-            try:
-                cmd = ssh_args + [host, CMD_STOP if expected == 'inactive' else CMD_START]
-                subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True).strip()
-                sys.stderr.write("%s changed from %s to %s\n" % (host, status, expected))
-            except Exception as e:
-                sys.stderr.write("%s update failed -- %s\n" % (host, e))
     return 0
 
 
