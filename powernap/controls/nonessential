@@ -20,20 +20,20 @@
 import os
 import sys
 import json
+import socket
 import wakeonlan
 import argparse
 import subprocess
 
 DEF_BASE_DIR = os.path.dirname(os.path.dirname(sys.argv[0]))
 
-DEF_HOSTS = {
-        "dubious": "74:d0:2b:0d:27:e6",
-        "host-tree": "70:54:d2:90:69:03",
-        "host-twig": "4c:72:b9:99:39:aa",
-        "host-trinket": "70:54:d2:90:69:ee",
-    }
-
 DEF_TIMEOUT = 10
+
+#  ping args used to probe host is up
+#
+PING_DEADLINE = 1
+PING_COUNT = 2
+PING_INTERVAL = 0.1
 
 
 def parse_args(argv):
@@ -46,8 +46,12 @@ def parse_args(argv):
     Issue poweroff and wake-on-lan commands to control servers
     running non-estential functions.
 
-    These is started on transitions to cost level below 2
-    and stopped on transitions to cost level above 2.
+    These are started on transitions to cost level below the host threshold
+    and stopped otherwise.
+
+    Note that the special 'id_rsa_poweroff' key must be set up in the
+    remote authorized_keys file to run the 'poweroff' command.  This
+    avoids granting powernap full root access.
     """
     )
     p.add_argument('-C', '--config-file', action='store', metavar='path', default=config_file,
@@ -56,6 +60,7 @@ def parse_args(argv):
                     help="Ssh key file allowing remote poweroff, default %s" % ssh_keyfile)
     p.add_argument('-t', '--timeout', action='store', type=int, default=DEF_TIMEOUT, metavar='secs',
                     help="Connect timeout for ssh, default %r" % DEF_TIMEOUT)
+    p.add_argument('-n', '--dryrun', action='store_true', help="Print any action needed instead of running it")
     p.add_argument('--host', action='store', metavar='internal_structure', help=argparse.SUPPRESS)
     p.add_argument('prev_level', type=int, help="The previous cost level")
     p.add_argument('next_level', type=int, help="The next cost level")
@@ -75,6 +80,60 @@ def parse_args(argv):
     return args
 
 
+def host_is_up(host, info):
+    """
+        Best module for ping processing is "pythonping" but it doesn't work on MacOS,
+        so easiest is to use the "ping" command, but it also has variations:
+
+            ping -c 2 -i 0.1 -n -q -w 1 192.168.11.50     # sys.platform.startswith('linux')
+
+            ping -c 2 -i 0.1 -n -q -t 1 192.168.11.50     # sys.platform.startswith('darwin') or sys.platform.startswith('freebsd')
+
+        exits:
+            Linux:
+                0: success
+                1: no response
+                2: command error
+            MacOS/FreeBSD:
+                0: success
+                2: no response
+               >2: command error
+
+        Note that MacOS doesn't allow non-privileged uses to use an interval less than 0.1 secs.
+    """
+
+    #  Resolve the hostname.  If that doesn't work, use the config value if
+    #  available, otherwise give up and report host is down.
+    #
+    try:
+        socket.inet_aton(host)
+        ip_addr = host
+    except socket.error:
+        try:
+            ip_addr = socket.gethostbyname(host)
+        except socket.error:
+            ip_addr = info.get('ip')
+    if sys.platform.startswith('linux'):
+        deadline = ['-w', str(PING_DEADLINE)]
+        timeout_return = 1
+    elif sys.platform.startswith('darwin') or sys.platform.startswith('freebsd'):
+        deadline = ['-t', str(PING_DEADLINE)]
+        timeout_return = 2
+    else:
+        raise Exception("Platform %r is unsupported for host-up test" % sys.platform)
+
+    cmd = ['ping', '-n', '-q', '-c', str(PING_COUNT), '-i', str(PING_INTERVAL)] + deadline + [ip_addr]
+    try:
+        subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        if e.returncode == timeout_return:
+            return False
+        else:
+            errtext = e.output.strip()
+            raise Exception("%s host 'up' check failed -- %s" % (host, errtext if errtext else e))
+
+
 def main(argv=None):
     args = parse_args(argv)
 
@@ -90,23 +149,47 @@ def main(argv=None):
                 ]
     ssh_args += ['-i', args.ssh_keyfile]
 
+    errors = 0
     for host, info in sorted(args.host.items()):
-        if not is_check:
-            print("%s: Level %d, threshold %d, would %s" %
-                    (host, args.next_level, info['threshold'], 'start' if args.next_level < info['threshold'] else 'stop'))
-        continue
-        cmd = ssh_args + [host, 'true']
-        try:
-            subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True).strip()
-        except subprocess.CalledProcessError as e:
-            status = e.output.strip()
-            if status != 'inactive':
-                sys.stderr.write("%s status check failed -- %s\n" % (host, status if status else e))
-                continue
-        except Exception as e:
-            sys.stderr.write("%s status check failed -- %s\n" % (host, e))
+        if info.get("disabled"):
             continue
-    return 0
+        expected = args.next_level < info['threshold']
+        host_up = host_is_up(host, info)
+
+        if expected == host_up:
+            if args.dryrun:
+                print("%s: Level %d, threshold %d, no change needed" % (host, args.next_level, info['threshold']))
+            continue
+
+        if is_check:
+            sys.stderr.write("%s should be %s, attempting correction\n" % (host, 'up' if expected else 'down'))
+        if args.dryrun:
+            print("%s: Level %d, threshold %d, would %s" %
+                    (host, args.next_level, info['threshold'], 'start' if expected else 'stop'))
+        elif expected:
+            try:
+                wakeonlan.send_magic_packet(info['mac'])
+                sys.stderr.write("Issued wake-on-lan to %r (%s) due to cost level %r\n" % (host, info['mac'], args.next_level))
+            except Exception as e:
+                sys.stderr.write("%s wake-on-lan failed -- %s\n" % (host, e))
+                errors += 1
+        else:
+            cmd = ssh_args + ['root@' + host, 'true']
+            try:
+                subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True)
+                sys.stderr.write("Issued poweroff to %r due to cost level %r\n" % (host, args.next_level))
+            except subprocess.CalledProcessError as e:
+                errtext = e.output.strip()
+                if 'closed by remote host' in errtext:
+                    sys.stderr.write("Issued poweroff to %r due to cost level %r\n" % (host, args.next_level))
+                else:
+                    sys.stderr.write("%s poweroff failed -- %s\n" % (host, errtext if errtext else e))
+                    errors += 1
+            except Exception as e:
+                sys.stderr.write("Error with %s poweroff -- %s\n" % (host, e))
+                errors += 1
+
+    return errors
 
 
 exit(main())
