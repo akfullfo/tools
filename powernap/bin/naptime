@@ -1,0 +1,153 @@
+#!/usr/bin/env python
+# ________________________________________________________________________
+#
+#  Copyright (C) 2020 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+
+import os
+import re
+import time
+import argparse
+from dateutil.parser import parse as isoparse
+
+DEF_BASEDIR = '/var/local/powernap'
+DEF_DURATION = '24h'
+
+HIST_SUBDIR = 'history'
+DAYSECS = 24 * 60 * 60
+
+
+def parse_args(argv, log=None):
+    def deltasecs(interval):
+        """
+            Convert a time interval in the form.
+
+                IwJdKhMmNs
+
+            Any element can be omitted.  Whitespace is allowed in
+            front of numeric parts, which can help readbility.
+        """
+        re_deltasplit = re.compile(r'(\s*\d+(\.\d+)?)([a-z]+)')
+        re_deltaval = re.compile(r'^((\s*\d+(\.\d+)?)([a-z]+))+$')
+        delta_resolution_div = {
+            'w': 7 * 24 * 60 * 60,
+            'd': 24 * 60 * 60,
+            'h': 60 * 60,
+            'm': 60,
+            's': 1,
+        }
+
+        #  If the interval converts directly to float, treat
+        #  the result as seconds and return directly
+        #
+        try:
+            return float(interval)
+        except:
+            pass
+
+        #  Ensure we have a valid sequence of interval segments.
+        #  Without this check, the findall might omit invalid
+        #  segments that the user thought would be included.
+        #
+        m = re_deltaval.match(interval)
+        if not m:
+            #  If the input didn't validate, try appending 's'
+            #  This handles a straight number input.
+            #
+            withs = interval + 's'
+            m = re_deltaval.match(withs)
+            if not m:
+                raise argparse.ArgumentTypeError("Invalid interval %r" % interval)
+            interval = withs
+
+        segs = re_deltasplit.findall(interval)
+        if segs is None or len(segs) == 0:
+            raise argparse.ArgumentTypeError("Invalid interval %r" % interval)
+        secs = 0
+        for val, _, scale in segs:
+            if scale not in delta_resolution_div:
+                raise argparse.ArgumentTypeError("Interval %r has unknown time-scale indicator %r" % (interval, scale))
+            try:
+                offset = float(val.strip())
+            except:
+                raise argparse.ArgumentTypeError("Interval %r has invalid number %r" % (interval, val))
+            secs += offset * delta_resolution_div[scale]
+        if secs > 366 * DAYSECS:
+            raise argparse.ArgumentTypeError("Interval %r must be less than one year" % interval)
+        return secs
+
+    p = argparse.ArgumentParser(
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            description="""
+    Analyze powernap logs and report on the time spent at each cost level.
+    """
+    )
+
+    p.add_argument('-d', '--basedir', action='store', metavar='path', default=DEF_BASEDIR,
+                    help="Directory to hold powernap history, default %r" % DEF_BASEDIR)
+    p.add_argument('-D', '--duration', action='store', metavar='DdHhMm', type=deltasecs,
+                    help="Duration of history to process, default %s" % DEF_DURATION)
+
+    args = p.parse_args()
+    if args.duration is None:
+        args.duration = deltasecs(DEF_DURATION)
+    return args
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    end_time_t = time.time()
+    start_time_t = end_time_t - args.duration
+    start_month = time.strftime("%Y%m", time.localtime(start_time_t - 31 * DAYSECS))
+    histdir = os.path.join(args.basedir, HIST_SUBDIR)
+    for mondir in sorted(os.listdir(histdir)):
+        if mondir < start_month:
+            continue
+        path = os.path.join(histdir, mondir, 'history.log')
+        if not os.path.exists(path):
+            continue
+        history = []
+        initial_level = 0
+        with open(path, 'rt') as f:
+            for line in f:
+                data = line.split()
+                dt = isoparse(data[0] + ' ' + data[1])
+                dt = dt.timestamp()
+                level = int(data[2])
+                if dt < start_time_t:
+                    initial_level = level
+                else:
+                    history.append((dt, level))
+
+    last_level = initial_level
+    last_time = start_time_t
+    aggregation = {}
+    for dt, level in history:
+        if last_level not in aggregation:
+            aggregation[last_level] = 0
+        aggregation[last_level] += dt - last_time
+        last_level = level
+        last_time = dt
+    if last_level not in aggregation:
+        aggregation[last_level] = 0
+    aggregation[last_level] += end_time_t - last_time
+
+    total_time = end_time_t - start_time_t
+    for level, secs in sorted(aggregation.items()):
+        print("Level %r  %.1f%% (%.1f hours)" % (level, secs * 100.0 / total_time, secs / 3600.0))
+
+
+exit(main())
