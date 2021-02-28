@@ -307,6 +307,9 @@ def application(environ, start_response):
             if snap.get('is_stale'):
                 bgcolor = '606060'
                 alerts.append('System problem, data is not current')
+            elif cost_cents is None:
+                bgcolor = 'A0A0A0'
+                alerts.append('System problem, no anticipated cost')
             else:
                 color_range = max_shade - undercoat
                 red = green = 0.0
@@ -354,7 +357,7 @@ body  {background-color: #%s; font-size: %s;}
 </span>
 <span style="font-family:Comic Sans MS; font-size:60%; color:white">
 {cheapest}<br/>
-(wholesale {wholesale}, delivered {delivered}, avg {average} per kWh)<br/>
+(cost {delivered}, avg {average}, wholesale {wholesale} per kWh)<br/>
 </span>
 <pre style="font-family:Comic Sans MS; font-size:60%; background-color: white; color:{use_color}">
 {current_use}
