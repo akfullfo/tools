@@ -57,6 +57,11 @@ AGE_LIMIT = 2000
 #  Number of days to include in the real-time averaging
 RT_AVG_DAYS = 35
 
+#  Reduce the weighting in the average by this factor for
+#  each day of age.
+#
+AVG_WEIGHT = 1.5
+
 #  Pricing is considered low-cost if it is less than
 #  the RT_AVG_DAYS average multiplied by this.
 #
@@ -169,10 +174,17 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
 
     def get_rt_average(base_dir, as_of, days):
         """
-            Find the average real-time pricing for the last N days.
+            Find the average real-time pricing for the last N days.  This returns a
+            weighted average which reduces each day's weight by AVG_WEIGHT so that the
+            most recent days have a much stringer effect than the subsequent days.
+
+            It also returns a raw average.
         """
         total = 0.0
         count = 0
+        weighted_total = 0.0
+        weight = 0.0
+        weighting = 1.0
 
         for day in range(days):
             when = time.localtime(as_of - day * DAY_SECS)
@@ -181,14 +193,18 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
                 with open(path, 'rt') as f:
                     for line in f:
                         ts, spp_cents = line.strip().split()[:2]
-                        total += as_delivered(spp_cents, delivery=delivery)
+                        val = as_delivered(spp_cents, delivery=delivery)
+                        total += val
                         count += 1
+                        weighted_total += val * weighting
+                        weight += weighting
+            weighting /= AVG_WEIGHT
         if count > 0:
-            return round(total / count, 4)
+            return round(weighted_total / weight, 4), round(total / count, 4)
         else:
             if log:
                 log.info("Average pricing not available")
-            return None
+            return None, None, None
 
     def demand_avg(demand, limit):
         count = 0
@@ -273,7 +289,7 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
     #
     now_hr = now.replace(minute=0, second=0, microsecond=0).strftime(DATE_FORMAT)
 
-    rt_avg = get_rt_average(base_dir, now_t, avg_days)
+    rt_avg, rt_raw_avg = get_rt_average(base_dir, now_t, avg_days)
     low_cost_level = rt_avg * LOW_COST_MULTIPLIER
 
     demand = get_demand_load(demand_dir, now_t)
@@ -330,6 +346,7 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
             "curr_spp_cents": float(spp_cents),
             "curr_delivered_cents": delivered_cents,
             "avg_delivered_cents": rt_avg,
+            "raw_avg_delivered_cents": rt_raw_avg,
             "demand_1m": demand[0],
             "demand_5m": demand[1],
             "demand_15m": demand[2],
