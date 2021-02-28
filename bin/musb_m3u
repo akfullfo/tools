@@ -42,6 +42,9 @@ The file extension change is needed because even though the Chevy decoder
 happily plays aac/m4a files, the file manager does not recognize them.
 
 Files are converted in-situ.
+
+The easiest way to get a playlist from iTunes is to select the playlist
+and then use:  File -> Library -> Export Playlist.
 """)
 
 p.add_argument('-n', '--dryrun', action='store_true', help="List files that would change without rewriting them")
