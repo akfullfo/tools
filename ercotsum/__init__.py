@@ -59,9 +59,9 @@ RT_AVG_DAYS = 35
 
 #  Reduce the weighting in the average by this factor for
 #  each day of age so that more recent costs have a
-#  greater effect of the average.
+#  somewhat greater effect of the average.
 #
-AVG_WEIGHT = 1.25
+AVG_WEIGHT = 1.05
 
 #  Pricing is considered low-cost if it is less than
 #  the RT_AVG_DAYS average multiplied by this.
