@@ -259,7 +259,7 @@ def application(environ, start_response):
             cost_cents = snap.get('next_anticipated_cents')
             demand = snap.get('demand_5m')
             demand_price = snap.get('curr_delivered_cents')
-            if is not None and demand < 0.0:
+            if demand is not None and demand < 0.0:
                 #  We only get paid the wholesale energy price when we
                 #  are generating.
                 #
@@ -277,8 +277,7 @@ def application(environ, start_response):
                     use_color = yellow_color
                 else:
                     use_color = red_color
-
-            generation = -demand if demand < 0.0 else 0.0
+            generation = -demand if demand is not None and demand < 0.0 else 0.0
 
             if cost_cents:
                 cost = "Current drier cost: %s per load" % drier_cost(cost_cents, generation=generation)
