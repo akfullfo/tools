@@ -262,12 +262,15 @@ def snapshot(base_dir=DEF_BASE_DIR, demand_dir=DEF_DEMAND_DIR, delivery=DEF_DELI
                 if log:
                     log.warning("Ingnoring demand entry %r -- %s", line, e)
 
-        demand.sort(reverse=True)
-        if demand[0][0] < as_of - AGE_LIMIT:
-            if log:
-                log.warning("Stale demand data detected, most recent is %.1f hours old", as_of - demand[0][0])
+        if demand:
+            demand.sort(reverse=True)
+            if demand[0][0] < as_of - AGE_LIMIT:
+                if log:
+                    log.warning("Stale demand data detected, most recent is %.1f hours old", as_of - demand[0][0])
 
-        return (demand_avg(demand, as_of - 60), demand_avg(demand, as_of - 300), demand_avg(demand, as_of - 900))
+            return (demand_avg(demand, as_of - 60), demand_avg(demand, as_of - 300), demand_avg(demand, as_of - 900))
+        else:
+            return (None, None, None)
 
     now_t = time.time()
     now = datetime.datetime.now(tz=dateutil.tz.tzlocal())
