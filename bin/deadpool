@@ -82,7 +82,10 @@ def parse_size(val):
     return int(size)
 
 
-def parse_duration(val):
+def parse_hms(val):
+    """
+        Original duration format like 18h24m
+    """
     secs = 0
     fields = re.split(r'([a-z])', val)
     while fields:
@@ -102,6 +105,36 @@ def parse_duration(val):
                 error("Invalid duration %r, bad scale char %r", val, scale)
                 return None
     return secs
+
+
+def parse_hh_mm_ss(val):
+    """
+        As of zfs-2.0.5-1, duration format changed from NhNm to hh:mm:ss format
+
+        Who knows when 'hh' > 24
+    """
+    secs = 0
+    fields = list(reversed(val.split(':')))
+    scales = ['s', 'm', 'h']
+    while fields:
+        try:
+            num = int(fields.pop(0))
+        except Exception as e:
+            error("Invalid duration %r, bad number -- %s", val, e)
+            return None
+        if scales:
+            secs += num * duration_scale[scales.pop(0)]
+        else:
+            error("Invalid duration %r, no scale available, too many fields", val, scale)
+            return None
+    return secs
+
+
+def parse_duration(val):
+    if ':' in val:
+        return parse_hh_mm_ss(val)
+    else:
+        return parse_hms(val)
 
 
 def parse_timestamp(val):
