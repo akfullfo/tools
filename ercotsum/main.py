@@ -248,7 +248,11 @@ def main(argv=None, ilog=None):
             return 2
         for colpos in range(2, table_width):
             #  Convert from dollars/megawatt
-            cents_per_kW = float(row[colpos]) * 100.0 / 1000.0
+            try:
+                cents_per_kW = float(row[colpos]) * 100.0 / 1000.0
+            except Exception as e:
+                log.error("Bad data %r in col %d of %s %s", row[colpos], colpos, row[0], row[1])
+                continue
             spp_table[b.colnames[colpos]].append((row_time_t, cents_per_kW))
 
     text = []
