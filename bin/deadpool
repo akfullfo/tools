@@ -210,6 +210,13 @@ def parse_scan(section):
         scan['size'] = parse_size(m.group(3))
         scan['total'] = parse_size(m.group(4))
         scan['rate'] = parse_size(m.group(5))
+    m = re.match(r'^(.*) in progress since \S+\s+(\S+\s+\S+\s+\S+\s+\S+) .* (\S+) issued at (\S+)/s, (\S+) total', text)
+    if m:
+        scan['op'] = m.group(1)
+        scan['date'] = parse_timestamp(m.group(2))
+        scan['size'] = parse_size(m.group(3))
+        scan['rate'] = parse_size(m.group(4))
+        scan['total'] = parse_size(m.group(5))
     if 'op' not in scan:
         scan['op'] = 'unparsed'
     if scan['op'].startswith('scrub '):
