@@ -34,13 +34,17 @@ DEF_DEMAND_DIR = '/var/local/rainbarrel'
 DEF_ZONE = 'LZ_NORTH'
 
 #  Oncor per-kWh delivery charge for North Central Texas as of 2020-8-1
-DEF_DELIVERY = 3.922
+#  See https://electricityplans.com/texas/utilities/oncor/
+#  Changes are Mar 1 and Sept 1 each year.
+#
+# DEF_DELIVERY = 3.922  # In 2020
+DEF_DELIVERY = 4.1543   # From 2021-9-1
 
-#  Oncor monthly base charge in dollars/month
-ONCOR_MONTHLY = 3.42
+#  TDO (eg Oncor) monthly base charge in dollars/month
+TDU_MONTHLY = 3.42
 
-#  Griddy monthly service fee in dollars/month
-GRIDDY_MONTHY = 9.99
+#  Retail (eg Griddy, Octopus) monthly service fee in dollars/month
+RETAIL_MONTHY = 10.00
 
 #  Estimated fraction for merchant services, taxes and fees
 TAXES_FEES = 0.09
@@ -145,7 +149,7 @@ def as_delivered(price, delivery=DEF_DELIVERY):
     """
     extended_price = float(price) * (1.0 + ANCILLARY_SERVICES)
     delivered_price = (extended_price + delivery) * (1.0 + TAXES_FEES)
-    base = (ONCOR_MONTHLY + GRIDDY_MONTHY) / 30.0 / 24.0 / 4.0
+    base = (TDU_MONTHLY + RETAIL_MONTHY) / 30.0 / 24.0 / 4.0
     return float(delivered_price + base)
 
 

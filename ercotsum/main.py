@@ -251,7 +251,7 @@ def main(argv=None, ilog=None):
             try:
                 cents_per_kW = float(row[colpos]) * 100.0 / 1000.0
             except Exception as e:
-                log.error("Bad data %r in col %d of %s %s", row[colpos], colpos, row[0], row[1])
+                log.error("Bad data %r in col %d of %s %s -- %s", row[colpos], colpos, row[0], row[1], e)
                 continue
             spp_table[b.colnames[colpos]].append((row_time_t, cents_per_kW))
 
