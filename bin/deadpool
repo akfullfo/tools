@@ -125,16 +125,23 @@ def parse_hh_mm_ss(val):
         if scales:
             secs += num * duration_scale[scales.pop(0)]
         else:
-            error("Invalid duration %r, no scale available, too many fields", val, scale)
+            error("Invalid duration %r, no scale available, too many fields", val, scales)
             return None
     return secs
 
 
 def parse_duration(val):
-    if ':' in val:
-        return parse_hh_mm_ss(val)
+    m = re.match(r'^(\d+) days? (\S+)', val)
+    if m:
+        days = int(m.group(1))
+        val = m.group(2)
     else:
-        return parse_hms(val)
+        days = 0
+    if ':' in val:
+        secs = parse_hh_mm_ss(val)
+    else:
+        secs = parse_hms(val)
+    return days * 24 * 3600 + secs
 
 
 def parse_timestamp(val):
@@ -196,27 +203,39 @@ def parse_config(section):
 def parse_scan(section):
     text = parse_default(section)
     scan = {'text': text}
-    m = re.match(r'^(.*) (\S+) in (\S+) with (\S+) errors? on \S+\s+(\S+\s+\S+\s+\S+\s+\S+)\s*$', text)
-    if m:
-        scan['op'] = m.group(1)
-        scan['size'] = parse_size(m.group(2))
-        scan['duration'] = parse_duration(m.group(3))
-        scan['errs'] = int(m.group(4))
-        scan['date'] = parse_timestamp(m.group(5))
-    m = re.match(r'^(.*) in progress since \S+\s+(\S+\s+\S+\s+\S+\s+\S+)\s*(\S+) scanned out of (\S+) at (\S+)/s', text)
-    if m:
-        scan['op'] = m.group(1)
-        scan['date'] = parse_timestamp(m.group(2))
-        scan['size'] = parse_size(m.group(3))
-        scan['total'] = parse_size(m.group(4))
-        scan['rate'] = parse_size(m.group(5))
-    m = re.match(r'^(.*) in progress since \S+\s+(\S+\s+\S+\s+\S+\s+\S+) .* (\S+) issued at (\S+)/s, (\S+) total', text)
-    if m:
-        scan['op'] = m.group(1)
-        scan['date'] = parse_timestamp(m.group(2))
-        scan['size'] = parse_size(m.group(3))
-        scan['rate'] = parse_size(m.group(4))
-        scan['total'] = parse_size(m.group(5))
+    for attempt in [0]:
+        m = re.match(r'^(.*) (\S+) in (\S+) with (\S+) errors? on \S+\s+(\S+\s+\S+\s+\S+\s+\S+)\s*$', text)
+        if m:
+            scan['op'] = m.group(1)
+            scan['size'] = parse_size(m.group(2))
+            scan['duration'] = parse_duration(m.group(3))
+            scan['errs'] = int(m.group(4))
+            scan['date'] = parse_timestamp(m.group(5))
+            break
+        m = re.match(r'^(.*) (\S+) in (\d+ days? \S+) with (\S+) errors? on \S+\s+(\S+\s+\S+\s+\S+\s+\S+)\s*$', text)
+        if m:
+            scan['op'] = m.group(1)
+            scan['size'] = parse_size(m.group(2))
+            scan['duration'] = parse_duration(m.group(3))
+            scan['errs'] = int(m.group(4))
+            scan['date'] = parse_timestamp(m.group(5))
+            break
+        m = re.match(r'^(.*) in progress since \S+\s+(\S+\s+\S+\s+\S+\s+\S+)\s*(\S+) scanned out of (\S+) at (\S+)/s', text)
+        if m:
+            scan['op'] = m.group(1)
+            scan['date'] = parse_timestamp(m.group(2))
+            scan['size'] = parse_size(m.group(3))
+            scan['total'] = parse_size(m.group(4))
+            scan['rate'] = parse_size(m.group(5))
+            break
+        m = re.match(r'^(.*) in progress since \S+\s+(\S+\s+\S+\s+\S+\s+\S+) .* (\S+) issued at (\S+)/s, (\S+) total', text)
+        if m:
+            scan['op'] = m.group(1)
+            scan['date'] = parse_timestamp(m.group(2))
+            scan['size'] = parse_size(m.group(3))
+            scan['rate'] = parse_size(m.group(4))
+            scan['total'] = parse_size(m.group(5))
+            break
     if 'op' not in scan:
         scan['op'] = 'unparsed'
     if scan['op'].startswith('scrub '):
