@@ -44,6 +44,15 @@ DEF_TIME_THRESHOLD = 30
 #
 DEF_MAX_PAGES = 1000
 
+#  Number times to attempt a time check.  Cameras have been
+#  seen to drop the connection periodically.
+#
+CHECK_TIME_RETRIES = 3
+
+#  Delay before retry to allow time for a network recovery.
+#
+CHECK_TIME_RETRY_DELAY = 5
+
 
 def parse_args(argv, log=None):
     p = argparse.ArgumentParser(
@@ -248,7 +257,27 @@ def check_time(camera, credentials, args):
         return int(abs(get_time() - time.time()))
 
     clock = Pages(camera, credentials, args)
-    time_delta = get_delta(clock('en/clock.asp'))
+
+    last_exc = None
+    for attempt in range(CHECK_TIME_RETRIES):
+        try:
+            time_delta = get_delta(clock('en/clock.asp'))
+            last_exc = None
+            if attempt > 0:
+                log.info("Camera %s time check attempt %d succeeded after failure", camera, attempt + 1)
+            break
+        except RemoteDisconnected as e:
+            log.info("Camera %s time check attempt %d failed -- %s", camera, attempt + 1, e)
+            last_exc = e
+            time.sleep(CHECK_TIME_RETRY_DELAY)
+            continue
+        except Exception as e:
+            log.error("Camera %s time check failed -- %s", camera, e)
+            return 1
+
+    if last_exc:
+        log.error("All time check attempts for camera %s failed -- %s", camera, last_exc)
+        return 1
 
     if time_delta < args.time_threshold:
         log.info("No significant time difference on %s", camera)
@@ -283,7 +312,7 @@ def check_time(camera, credentials, args):
         return 0
     else:
         log.warning("Time delta excessive after update on %s", camera)
-        return 2
+        return 1
 
 
 _re_dt_path = re.compile(r'^\w*_(\d\d\d\d)-(\d\d)-(\d\d)_.*\.\w+$')
@@ -425,14 +454,15 @@ def main(argv=None, ilog=None):
             exit(4)
 
     if args.check_time:
+        errors = 0
         if args.check_all:
             for camera in sorted(credentials):
                 args.host = camera
-                check_time(camera, credentials[camera], args)
+                errors += check_time(camera, credentials[camera], args)
         else:
             camera = args.name
-            check_time(camera, credentials[camera], args)
-        exit(0)
+            errors += check_time(camera, credentials[camera], args)
+        exit(errors)
 
     camerabase = os.path.join(args.destdir, camera)
     if not os.path.isdir(camerabase):
