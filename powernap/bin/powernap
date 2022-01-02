@@ -38,6 +38,7 @@ DEF_RANDOM_DELTA = 15
 DEF_BASEDIR = '/var/local/powernap'
 DEF_PROGDIR = '/usr/local/powernap/controls'
 DEF_POWER_URL = 'https://mmm.fullford.com/power?fmt=json'
+DEF_SUPPRESS = os.path.join(DEF_BASEDIR, 'suppress')
 DEF_TIMEOUT = 30
 DEF_HYSTERESIS = 1200
 DEF_CHECK_PERIOD = 900
@@ -82,6 +83,10 @@ def parse_args(argv, log=None):
     p.add_argument('-u', '--power-url', action='store', default=DEF_POWER_URL,
                     help="URL to fetch the 'ercotsum' JSON power pricing, default %r.  "
                          "If the value is a path to an existing file, that file will be read each cycle" % DEF_POWER_URL)
+    p.add_argument('-S', '--suppress', action='store', metavar='path', default=DEF_SUPPRESS,
+                    help="If this file exists, controls will be suppressed.  This is used by the UPS "
+                         "control to prevent this program from restarting systems while on battery power, "
+                         "default %r" % DEF_SUPPRESS)
     p.add_argument('-H', '--hysteresis', action='store', type=int, metavar='secs', default=DEF_HYSTERESIS,
                     help="Ensure state change operations are triggered no more frequently than this, "
                          "default %r secs" % DEF_HYSTERESIS)
@@ -154,10 +159,9 @@ def history(args, state):
             raise Error("History dir %r doesn't exist and can't be created -- %s" % (path, e))
     path = os.path.join(path, 'history.log')
     with open(path, "at") as f:
-        f.write("%s %s%s\n" %
-                    (now.strftime("%Y-%m-%d %H:%M:%S%z"),
-                    state.get('cost_level'),
-                    ' %r deferred' % state.get('deferred_level') if state.get('deferred') else ''))
+        f.write("%s %s%s\n" % (now.strftime("%Y-%m-%d %H:%M:%S%z"),
+                               state.get('cost_level'),
+                               ' %r deferred' % state.get('deferred_level') if state.get('deferred') else ''))
 
 
 def get_state(args):
@@ -289,6 +293,10 @@ def process(args):
         except Exception as e:
             Fatal("State dir %r doesn't exist and can't be created -- %s" % (hist_dir, e))
 
+    if args.suppress and os.path.exists(args.suppress):
+        log.warning("Processing currently suppressed due to power failure")
+        return
+
     if os.path.isfile(args.power_url):
         with open(args.power_url, "rt") as f:
             snap = json.load(f)
@@ -301,8 +309,6 @@ def process(args):
 
     if not deferred:
         control(args, cost_level, prev_level)
-
-    return
 
 
 def main(argv=None, ilog=None):

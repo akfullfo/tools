@@ -21,9 +21,12 @@ import os
 import sys
 import json
 import socket
-import wakeonlan
 import argparse
 import subprocess
+try:
+    import wakeonlan
+except ImportError:
+    pass
 
 DEF_BASE_DIR = os.path.dirname(os.path.dirname(sys.argv[0]))
 
@@ -38,7 +41,8 @@ PING_INTERVAL = 0.1
 
 def parse_args(argv):
     config_file = os.path.join(DEF_BASE_DIR, 'config', 'nonessential.json')
-    ssh_keyfile = os.path.join(DEF_BASE_DIR, '.ssh', 'id_rsa_poweroff')
+    poweroff_key = os.path.join(DEF_BASE_DIR, '.ssh', 'id_rsa_poweroff')
+    virsh_key = os.path.join(DEF_BASE_DIR, '.ssh', 'id_rsa_virshops')
 
     p = argparse.ArgumentParser(
             formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -56,11 +60,14 @@ def parse_args(argv):
     )
     p.add_argument('-C', '--config-file', action='store', metavar='path', default=config_file,
                     help="Configuration in JSON format, default %r" % config_file)
-    p.add_argument('-i', '--ssh-keyfile', action='store', default=ssh_keyfile, metavar='path',
-                    help="Ssh key file allowing remote poweroff, default %s" % ssh_keyfile)
+    p.add_argument('-i', '--poweroff-key', action='store', default=poweroff_key, metavar='path',
+                    help="Ssh key file allowing remote poweroff, default %s" % poweroff_key)
+    p.add_argument('-V', '--virsh-key', action='store', default=virsh_key, metavar='path',
+                    help="Ssh key file allowing remote KVM start and shutdown, default %s" % virsh_key)
     p.add_argument('-t', '--timeout', action='store', type=int, default=DEF_TIMEOUT, metavar='secs',
                     help="Connect timeout for ssh, default %r" % DEF_TIMEOUT)
     p.add_argument('-n', '--dryrun', action='store_true', help="Print any action needed instead of running it")
+    p.add_argument('--force-down', action='store_true', help="Force the 'down' behavior except if operation is disabled")
     p.add_argument('--host', action='store', metavar='internal_structure', help=argparse.SUPPRESS)
     p.add_argument('prev_level', type=int, help="The previous cost level")
     p.add_argument('next_level', type=int, help="The next cost level")
@@ -75,8 +82,10 @@ def parse_args(argv):
     except Exception as e:
         raise argparse.ArgumentTypeError("Config error: %s" % e)
 
-    if not os.path.exists(args.ssh_keyfile):
-        raise argparse.ArgumentTypeError("Dedicated power-off ssh key file %r is missing" % args.ssh_keyfile)
+    if not os.path.exists(args.poweroff_key):
+        raise argparse.ArgumentTypeError("Dedicated power-off ssh key file %r is missing" % args.poweroff_key)
+    if not os.path.exists(args.virsh_key):
+        raise argparse.ArgumentTypeError("Dedicated virsh ops ssh key file %r is missing" % args.virsh_key)
     return args
 
 
@@ -134,11 +143,7 @@ def host_is_up(host, info):
             raise Exception("%s host 'up' check failed -- %s" % (host, errtext if errtext else e))
 
 
-def main(argv=None):
-    args = parse_args(argv)
-
-    is_check = args.prev_level == args.next_level
-
+def remote_cmd(args, keyfile, host, rem_cmd, name='poweroff'):
     ssh_args = ['ssh',
                     '-2',
                     '-T',
@@ -147,18 +152,48 @@ def main(argv=None):
                     '-o', 'PreferredAuthentications=publickey',
                     '-o', 'ConnectTimeout=%d' % args.timeout,
                 ]
-    ssh_args += ['-i', args.ssh_keyfile]
+    cmd = ssh_args + ['-i', keyfile] + ['root@' + host] + rem_cmd
+    try:
+        subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True)
+        if args.force_down:
+            sys.stderr.write("Issued %s to %r due to --force-down\n" % (name, host))
+        else:
+            sys.stderr.write("Issued %s to %r due to cost level %r\n" % (name, host, args.next_level))
+        return True
+    except subprocess.CalledProcessError as e:
+        errtext = e.output.strip()
+        if 'closed by remote host' in errtext:
+            sys.stderr.write("Issued %s to %r due to cost level %r\n" % (name, host, args.next_level))
+        else:
+            sys.stderr.write("%s %s failed -- %s\n" % (host, name, errtext if errtext else e))
+    except Exception as e:
+        sys.stderr.write("Error with %s %s -- %s\n" % (host, name, e))
+    return False
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
+    is_check = args.prev_level == args.next_level
 
     errors = 0
     for host, info in sorted(args.host.items()):
-        if info.get("disabled"):
-            continue
-        expected = args.next_level < info['threshold']
+        if args.force_down:
+            expected = False
+        else:
+            expected = args.next_level < info['threshold']
+
         host_up = host_is_up(host, info)
 
         if expected == host_up:
             if args.dryrun:
                 print("%s: Level %d, threshold %d, no change needed" % (host, args.next_level, info['threshold']))
+            continue
+
+        #  The disabled flag only applies to shutdowns.  This allows the normal
+        #  bringup to be used to recover from a power failure.
+        #
+        if not expected and info.get("disabled"):
             continue
 
         if is_check:
@@ -167,27 +202,27 @@ def main(argv=None):
             print("%s: Level %d, threshold %d, would %s" %
                     (host, args.next_level, info['threshold'], 'start' if expected else 'stop'))
         elif expected:
-            try:
-                wakeonlan.send_magic_packet(info['mac'])
-                sys.stderr.write("Issued wake-on-lan to %r (%s) due to cost level %r\n" % (host, info['mac'], args.next_level))
-            except Exception as e:
-                sys.stderr.write("%s wake-on-lan failed -- %s\n" % (host, e))
-                errors += 1
-        else:
-            cmd = ssh_args + ['root@' + host, 'true']
-            try:
-                subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True)
-                sys.stderr.write("Issued poweroff to %r due to cost level %r\n" % (host, args.next_level))
-            except subprocess.CalledProcessError as e:
-                errtext = e.output.strip()
-                if 'closed by remote host' in errtext:
-                    sys.stderr.write("Issued poweroff to %r due to cost level %r\n" % (host, args.next_level))
-                else:
-                    sys.stderr.write("%s poweroff failed -- %s\n" % (host, errtext if errtext else e))
+            kvm_host = info.get("kvm")
+            if kvm_host:
+                cmd = 'start ' + host
+                if not remote_cmd(args, args.virsh_key, kvm_host, [cmd], name=cmd):
                     errors += 1
-            except Exception as e:
-                sys.stderr.write("Error with %s poweroff -- %s\n" % (host, e))
-                errors += 1
+            else:
+                try:
+                    wakeonlan.send_magic_packet(info['mac'])
+                    sys.stderr.write("Issued wake-on-lan to %r (%s) due to cost level %r\n" % (host, info['mac'], args.next_level))
+                except Exception as e:
+                    sys.stderr.write("%s wake-on-lan failed -- %s\n" % (host, e))
+                    errors += 1
+        else:
+            kvm_host = info.get("kvm")
+            if kvm_host:
+                cmd = 'shutdown ' + host
+                if not remote_cmd(args, args.virsh_key, kvm_host, [cmd], name=cmd):
+                    errors += 1
+            else:
+                if not remote_cmd(args, args.poweroff_key, host, ['true']):
+                    errors += 1
 
     return errors
 
