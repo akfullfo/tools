@@ -205,6 +205,7 @@ def main(argv=None, ilog=None):
     b.feed(data)
     if len(b.colnames) < 3:
         log.error("Bad colname list: %s", b.colnames)
+        return 2
     if b.colnames[0] != COL0_NAME:
         log.error("Expecting %r as first colname, got %r", COL0_NAME, b.colnames[0])
     if b.colnames[1] not in COL1_NAMES:
