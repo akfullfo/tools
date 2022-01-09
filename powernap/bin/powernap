@@ -24,6 +24,7 @@ import argparse
 import signal
 import time
 import datetime
+import traceback
 import subprocess
 import dateutil.parser
 import logging
@@ -327,7 +328,12 @@ def main(argv=None, ilog=None):
             log.error("Fatal -- %s", e)
             return 3
         except Exception as e:
-            log.error("Unexpected exception -- %s", e, exc_info=True)
+            log.error("Unexpected exception -- %s", e)
+            for block in traceback.format_tb(e.__traceback__):
+                for line in block.splitlines():
+                    line = line.rstrip()
+                    if line:
+                        log.error("]  %s", line)
             delta = 0
             ret = 2
 
