@@ -37,8 +37,9 @@ DEF_ZONE = 'LZ_NORTH'
 #  See https://electricityplans.com/texas/utilities/oncor/
 #  Changes are Mar 1 and Sept 1 each year.
 #
-# DEF_DELIVERY = 3.922  # In 2020
-DEF_DELIVERY = 4.1543   # From 2021-9-1
+# DEF_DELIVERY = 3.922      # In 2020
+# DEF_DELIVERY = 4.1543     # From 2021-9-1
+DEF_DELIVERY = 3.5585       # From 2022-3-10
 
 #  TDO (eg Oncor) monthly base charge in dollars/month
 TDU_MONTHLY = 3.42
