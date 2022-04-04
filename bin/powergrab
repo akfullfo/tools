@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+# ________________________________________________________________________
+#
+#  Copyright (C) 2022 Andrew Fullford
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# ________________________________________________________________________
+#
+
+import sys
+import os
+import time
+import re
+import argparse
+import json
+from dateutil import parser as dateutil_parser
+from datetime import datetime
+
+RECORD_BASE = '/var/local'
+DEF_ERCOTSUM_DIR = os.path.join(RECORD_BASE, 'ercotsum')
+DEF_RAINBARREL_DIR = os.path.join(RECORD_BASE, 'rainbarrel')
+
+verbose = True
+
+AS_BILLED = {
+    #            Cost, Anci,  Tax,  kWh, c/kWh, Solar
+    "2021-05": ( 8170,  978,  609, 1956,  8.21,  802),
+    "2021-05": (10577, 1259,  739, 2518,  8.23,  424),
+    "2021-07": (14885, 1371,  933, 2743,  9.45,  709),
+    "2021-08": (23731, 1192, 1555, 2383, 13.99,  875),
+    "2021-09": (11449,  901,  685, 1802, 10.72, 1437),
+    "2021-10": ( 9577,  796,  628, 1592, 10.72, 1693),
+    "2021-11": ( 8501,  708,  560, 1415, 10.73, 1166),
+    "2021-12": (10248,  853,  931, 1706, 11.17,  403),
+}
+
+TDU_RATE = 4.1543
+TDU_MONTHLY = 342
+OCTO_MONTHLY = 1000
+
+
+def error(fmt, *fargs):
+    sys.stderr.write((fmt.rstrip() % fargs) + "\n")
+
+
+def message(fmt, *fargs):
+    if verbose:
+        sys.stdout.write((fmt.rstrip() % fargs) + "\n")
+
+
+def iso8601(datestring):
+    return(int(datetime.timestamp(dateutil_parser.parse(datestring))))
+
+
+def round15min(time_t):
+    """
+        Pricing is measured ar 15 minute slots.  This converts
+        an time_t value to the most recent 15 minute slot
+    """
+    return (time_t // 900) * 900
+
+
+re_rt_split = re.compile(r'(^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})\s+(.*)$')
+re_del_split = re.compile(r'(^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[.\d]*[+-]\d{2}):(\d{2})\s+(.*)$')
+
+p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
+                            description="""
+Determine power cost and, maybe later, the cost based on actual usage.
+""")
+
+p.add_argument('-q', '--quiet', action='store_true', help='Only report errors')
+p.add_argument('-E', '--ercotsum-dir', metavar='path', default=DEF_ERCOTSUM_DIR,
+                help='Directory where ERCOT pricing records are held, default %r' % DEF_ERCOTSUM_DIR)
+p.add_argument('-R', '--rainbarrel-dir', metavar='path', default=DEF_RAINBARREL_DIR,
+                help='Directory where Rainforest EAGLE usage records are held, default %r' % DEF_RAINBARREL_DIR)
+p.add_argument('yyyymm', nargs='+', help='One or more YYYYMM dates to scan')
+
+args = p.parse_args()
+
+if args.quiet:
+    verbose = False
+
+def process_month(args, yyyymm, heading=False):
+    yyyy_mm = yyyymm[0:4] + '-' + yyyymm[4:7]
+
+    pricing_dirs = set()
+    for dname in os.listdir(args.ercotsum_dir):
+        if dname.startswith(yyyymm):
+            pricing_dirs.add(dname)
+
+    if not pricing_dirs:
+        error("No pricing found for %s", yyyy_mm)
+        return False
+
+    #  We need data from the day before so the first few measurements have
+    #  pricing info
+    #
+    earliest_time_t = None
+    earliest_dir = sorted(pricing_dirs)[0]
+    path = os.path.join(args.ercotsum_dir, earliest_dir, 'rt.txt')
+    with open(path, 'rt') as f:
+        for line in f:
+            line = line.strip()
+            m = re_rt_split.match(line)
+            if m:
+                earliest_time_t = iso8601(m.group(1))
+                break
+    if not earliest_time_t:
+        error("Could not determine earliest timestamp from %s", path)
+        return False
+
+    previous_dir = time.strftime("%Y%m%d", time.localtime(earliest_time_t - 12*3600))
+    pricing_dirs.add(previous_dir)
+
+    price_max = 0
+    price_min = None
+    price_cnt = 0
+    price_tot = 0
+    price_hist = {}
+
+    for d in sorted(pricing_dirs):
+        in_range = d.startswith(yyyymm)
+
+        path = os.path.join(args.ercotsum_dir, d, 'rt.txt')
+        with open(path, 'rt') as f:
+            line_cnt = 0
+            for line in f:
+                line_cnt += 1
+                line = line.strip()
+                m = re_rt_split.match(line)
+                if m:
+                    try:
+                        time_t = iso8601(m.group(1))
+                        time15_t = round15min(time_t)
+                        if time_t != time15_t:
+                            message("Line +%d %s: Timestamp %r not on 15 min boundary", line_cnt, path, m.group(1))
+                    except Exception as e:
+                        error("Line +%d %s: Bad timestamp %r -- %s", line_cnt, path, m.group(1), e)
+                        continue
+                    try:
+                        price = float(m.group(2))
+                    except Exception as e:
+                        error("Line +%d %s: Bad wholesale price %r -- %s", line_cnt, path, m.group(2), e)
+                        continue
+
+                    if time15_t in price_hist:
+                        delta = abs(price_hist[time15_t] - price)
+                        if delta > 0.00001:
+                            message("Line +%d %s: Duplicate timestamp %r, delta %.4f cents",
+                                    line_cnt, path, time15_t, price_hist[time15_t] - price)
+                    price_hist[time15_t] = price
+
+                    if in_range:
+                        #  As we added the last day of the prior month, only include the
+                        #  current month values for the stats calculations.
+                        #
+                        price_cnt += 1
+                        price_tot += price
+                        if price_min is None or price_min > price:
+                            price_min = price
+                        if price_max < price:
+                            price_max = price
+                elif line.startswith('#') or not line:
+                    continue
+                else:
+                    error("Line +%d %s: Bad pricing line %r", line_cnt, path, line)
+
+    usage_files = set()
+
+    for fname in os.listdir(args.rainbarrel_dir):
+        if fname.startswith(yyyy_mm) and fname.endswith('.delivered'):
+            usage_files.add(os.path.join(args.rainbarrel_dir, fname))
+
+    usage = {}
+    prev_usage = None
+    delivered_start = None
+    delivered_end = None
+
+    for path in sorted(usage_files):
+        with open(path, 'rt') as f:
+            line_cnt = 0
+            for line in f:
+                line_cnt += 1
+                line = line.strip()
+                pricing = None
+                m = re_del_split.match(line)
+                if m:
+                    try:
+                        delivered = float(m.group(3))
+                    except Exception as e:
+                        error("Line +%d %s: Bad delivery %r -- %s", line_cnt, path, m.group(3), e)
+                        continue
+                    if prev_usage is None:
+                        prev_usage = delivered
+                        delivered_start = delivered
+                    delivered_end = delivered
+                    used = delivered - prev_usage
+                    prev_usage = delivered
+
+                    when = m.group(1) + m.group(2)
+
+                    if used < 0:
+                        message("%s had a negative usage of %.1f", when, used)
+
+                    try:
+                        time_t = iso8601(when)
+                        time15_t = round15min(time_t)
+                        if time15_t in price_hist:
+                            pricing = price_hist[time15_t]
+                        else:
+                            slot = time15_t
+                            for attempt in range(1, 20):
+                                slot -= 900
+                                if slot in price_hist:
+                                    pricing = price_hist[slot]
+                                    if attempt > 4:
+                                        message("Pricing for %s required %d 15 min backoffs", when, attempt)
+                                    break
+                        if pricing is None:
+                            message("No pricing for %s in %s", when, path)
+                        else:
+                            usage[time_t] = (used, pricing)
+                    except Exception as e:
+                        error("Line +%d %s: Bad timestamp %r -- %s", line_cnt, path, when, e)
+                        continue
+                elif line.startswith('#') or not line:
+                    continue
+                else:
+                    error("Line +%d %s: Bad usage line %r", line_cnt, path, line)
+
+    total_cost = 0.0
+    for time_t in sorted(usage):
+        used, price = usage[time_t]
+        cost = used * price
+        total_cost += cost
+
+    total_delivered = delivered_end - delivered_start
+    if yyyy_mm in AS_BILLED:
+        rates = AS_BILLED[yyyy_mm]
+        cents_ws = rates[0]
+        cents_anci = rates[1]
+        cents_tax = rates[2]
+        kwh_billed = rates[3]
+        octo_rate = rates[4]
+        cents_solar = rates[5]
+
+        est_cents = OCTO_MONTHLY + TDU_MONTHLY + total_delivered * TDU_RATE + total_cost + cents_anci + cents_tax - cents_solar
+        est_rate = est_cents / total_delivered
+    else:
+        error("No Octopus data for %s", yyyy_mm)
+        return False
+
+    if heading:
+        print("%7s %4s %6s %6s %6s %6s %8s %8s %6s %8s %8s %8s %8s %10s" %
+                ("Month", "Days", "Min c", "Max c",
+                 "Avg c", "kWhAvg", "kWh", "OctokWh", "Delta",
+                 "Pred$", "Octo$", "PredRate", "OctoRate", "Over c/kWh"))
+
+    print("%7s %4d %6.2f %6.2f %6.2f %6.2f %8.1f %8.1f %6.1f %8.2f %8.2f %8.2f %8.2f %10.2f" %
+            (yyyy_mm, len(pricing_dirs) - 1, price_min, price_max,
+             price_tot / price_cnt, total_cost / total_delivered, total_delivered, kwh_billed, total_delivered - kwh_billed,
+             total_cost / 100.0, cents_ws / 100.0, est_rate, octo_rate, octo_rate - est_rate))
+
+heading = True
+
+for yyyymm in args.yyyymm:
+    process_month(args, yyyymm, heading=heading)
+    heading = False
