@@ -168,6 +168,10 @@ class Config(object):
         if not sline:
             return
         fields = sline.split()
+        if fields[0] == 'cache':
+            self.last_pool = 'cache'
+            config[self.last_pool] = {}
+            return
         if len(fields) < 5:
             error("Bad config line: %s", sline)
             return
