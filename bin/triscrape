@@ -256,7 +256,23 @@ def check_time(camera, credentials, args):
         get_time.feed(clock('en/clock.asp'))
         return int(abs(get_time() - time.time()))
 
-    clock = Pages(camera, credentials, args)
+    last_exc = None
+    for attempt in range(CHECK_TIME_RETRIES):
+        try:
+            clock = Pages(camera, credentials, args)
+            last_exc = None
+            if attempt > 0:
+                log.info("Camera %s time check connect attempt %d succeeded after failure", camera, attempt + 1)
+            break
+        except Exception as e:
+            log.warning("Camera %s time check connect attempt %d failed -- %s", camera, attempt + 1, e)
+            last_exc = e
+            time.sleep(CHECK_TIME_RETRY_DELAY)
+            continue
+
+    if last_exc:
+        log.error("All time check attempts for camera %s failed -- %s", camera, last_exc)
+        return 1
 
     last_exc = None
     for attempt in range(CHECK_TIME_RETRIES):
