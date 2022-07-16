@@ -18,6 +18,7 @@
 #
 
 import sys
+import time
 import json
 import os.path
 import argparse
@@ -32,6 +33,7 @@ DEF_TRANSITION_LEVEL = 1
 CMD_STATUS = 'systemctl is-active boinc-client'
 CMD_STOP = 'systemctl stop boinc-client'
 CMD_START = 'systemctl start boinc-client'
+CMD_RESET = 'systemctl restart boinc-client'
 
 #  Check mode is:  systemctl is-active boinc-client
 #  Answers: <= 0 should be "active"
@@ -80,6 +82,29 @@ def parse_args(argv):
     return args
 
 
+def host_cmd(args, host, cmd):
+    ssh_args = ['ssh',
+                    '-2',
+                    '-T',
+                    '-x',
+                    '-n',
+                    '-o', 'PreferredAuthentications=publickey',
+                    '-o', 'ConnectTimeout=%d' % args.timeout,
+                ]
+    if os.path.isfile(args.ssh_keyfile):
+        ssh_args += ['-i', args.ssh_keyfile]
+    ssh_cmd = ssh_args + [host, cmd]
+    try:
+        status = subprocess.check_output(ssh_cmd, stderr=subprocess.STDOUT, universal_newlines=True).strip()
+    except subprocess.CalledProcessError as e:
+        status = e.output.strip()
+        if not status:
+            status = str(e)
+    except Exception as e:
+        status = str(e)
+    return status
+
+
 def main(argv=None):
     args = parse_args(argv)
 
@@ -91,38 +116,23 @@ def main(argv=None):
         expected = 'inactive'
     is_check = args.prev_level == args.next_level
 
-    ssh_args = ['ssh',
-                    '-2',
-                    '-T',
-                    '-x',
-                    '-n',
-                    '-o', 'PreferredAuthentications=publickey',
-                    '-o', 'ConnectTimeout=%d' % args.timeout,
-                ]
-    if os.path.isfile(args.ssh_keyfile):
-        ssh_args += ['-i', args.ssh_keyfile]
-
     for host in args.host:
-        cmd = ssh_args + [host, CMD_STATUS]
-        try:
-            status = subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True).strip()
-        except subprocess.CalledProcessError as e:
-            status = e.output.strip()
-            if status != 'inactive':
-                sys.stderr.write("%s status check failed -- %s\n" % (host, status if status else e))
-                continue
-        except Exception as e:
-            sys.stderr.write("%s status check failed -- %s\n" % (host, e))
-            continue
-        if status != expected:
+        status = host_cmd(args, host, CMD_STATUS)
+        if status == 'failed':
+            sys.stderr.write("%s status is 'failed' -- attempting reset\n" % host)
+            host_cmd(args, host, CMD_RESET)
+            time.sleep(1)
+            status = host_cmd(args, host, CMD_STATUS)
+        if status not in ('active', 'inactive'):
+            sys.stderr.write("%s status check failed -- %s\n" % (host, status))
+        elif status != expected:
             if is_check:
                 sys.stderr.write("%s found %s when %s expected, attempting correction\n" % (host, status, expected))
-            try:
-                cmd = ssh_args + [host, CMD_STOP if expected == 'inactive' else CMD_START]
-                subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True).strip()
+            result = host_cmd(args, host, CMD_STOP if expected == 'inactive' else CMD_START)
+            if result:
+                sys.stderr.write("%s update failed -- %s\n" % (host, result))
+            else:
                 sys.stderr.write("%s changed from %s to %s\n" % (host, status, expected))
-            except Exception as e:
-                sys.stderr.write("%s update failed -- %s\n" % (host, e))
     return 0
 
 
