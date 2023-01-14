@@ -249,7 +249,7 @@ p.add_argument('host_under_test', help='The site (FQDN only) to be tested')
 
 args = p.parse_args()
 
-if args.probe_period > 1:
+if args.probe_period and args.probe_period > 1:
     initial_delay = args.probe_period
     retry_delay = args.probe_period
 else:
