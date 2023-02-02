@@ -178,6 +178,9 @@ def main(argv=None):
 
     errors = 0
     for host, info in sorted(args.host.items()):
+        if info.get("off"):
+            continue
+
         if args.force_down:
             expected = False
         else:
