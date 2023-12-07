@@ -102,11 +102,11 @@ try:
         now = time.time()
         if last_run + args.dampen > now:
             if not args.quiet:
-                print "Dampened " + ' '.join(paths)
+                print("Dampened " + ' '.join(paths))
             continue
         last_run = now
         if not args.quiet:
-            print ' '.join(paths)
+            print(' '.join(paths))
         if args.command:
             try:
                 export_env['TOUCHE_PATHS'] = ' '.join(paths)
