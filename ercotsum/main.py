@@ -23,6 +23,7 @@ import time
 import logging
 import logging.handlers
 import argparse
+from socket import TimeoutError
 
 from . import DEF_BASE_DIR, DEF_DELIVERY, DEF_ZONE, DAY_SECS, DATE_FORMAT, RT_FILE, DAM_FILE, \
               PageType, Browse, fetch, snapshot
@@ -200,7 +201,15 @@ def main(argv=None, ilog=None):
         with open(args.file, 'rt') as f:
             data = f.read()
     else:
-        data = fetch(args)
+        try:
+            data = fetch(args)
+        except TimeoutError:
+            log.error("Connection to %r timed out", args.url)
+            exit(2)
+        except Exception as e:
+            log.error("Error connecting to %r -- %s", args.url, e, exc_info=True)
+            exit(3)
+
     b = Browse()
     b.feed(data)
     if len(b.colnames) < 3:
