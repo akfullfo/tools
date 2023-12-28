@@ -23,7 +23,6 @@ import time
 import logging
 import logging.handlers
 import argparse
-from socket import TimeoutError
 
 from . import DEF_BASE_DIR, DEF_DELIVERY, DEF_ZONE, DAY_SECS, DATE_FORMAT, RT_FILE, DAM_FILE, \
               PageType, Browse, fetch, snapshot
