@@ -41,7 +41,7 @@ DEF_STYLE = 'loudnorm'
 #STD_LOUDNORM = 'loudnorm=I=-23:LRA=7:tp=-2:print_format=json'
 
 #  Example from: http://k.ylo.ph/2016/04/04/loudnorm.html
-STD_LOUDNORM = 'loudnorm=I=-16:LRA=11:tp=-1.5:print_format=json'
+STD_LOUDNORM = 'loudnorm=I=-12:LRA=11:tp=-1.5:print_format=json'
 
 #  Supported styles.  The value indicates whether the Workload
 #  object should be instantiated per audio file, or per
@@ -245,7 +245,7 @@ class Workload(object):
                     max_db = float(max_db)
                 break
         if max_db is None:
-            self.warning("No max_volume found by: %s", ' '.join(cmd))
+            log.warning("No max_volume found by: %s", ' '.join(cmd))
             max_db = 0.0
         elif max_db > 0.01:
             self.error("Detected positive dB %.1f", max_db)
